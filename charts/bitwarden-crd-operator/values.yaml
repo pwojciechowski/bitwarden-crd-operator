@@ -33,6 +33,8 @@ deploymentStrategy: "Recreate"
 ##    value: "3600"
 ##  - name: BW_AUTH_FAILURE_THRESHOLD
 ##    value: "3"
+##  - name: BW_AUTH_COOLDOWN_SECONDS
+##    value: "30"
 
 externalConfigSecret:
   enabled: false

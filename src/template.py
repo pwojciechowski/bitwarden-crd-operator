@@ -3,11 +3,16 @@ import base64
 import kubernetes
 
 from utils.utils import (
-    get_secret_from_bitwarden, parse_login_scope, parse_fields_scope, get_attachment,
-    unlock_bw, bw_sync_interval,
-    build_secret_metadata, extract_secret_config, parse_old_config,
-    should_recreate_secret, apply_owner_reference,
-    delete_secret, create_secret, update_secret
+    unlock_bw,
+    bw_sync_interval,
+    build_secret_metadata,
+    extract_secret_config,
+    parse_old_config,
+    should_recreate_secret,
+    apply_owner_reference,
+    delete_secret,
+    create_secret,
+    update_secret,
 )
 from lookups.bitwarden_lookup import BitwardenLookupHandler
 from jinja2 import Environment, BaseLoader

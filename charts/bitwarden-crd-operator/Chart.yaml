@@ -4,9 +4,9 @@ description: Deploy the Bitwarden CRD Operator
 
 type: application
 
-version: "v0.18.0"
+version: "v0.18.1"
 
-appVersion: "0.17.0"
+appVersion: "0.18.1"
 
 keywords:
   - operator
@@ -112,8 +112,14 @@ annotations:
   artifacthub.io/operator: "true"
   artifacthub.io/containsSecurityUpdates: "false"
   artifacthub.io/changes: |
-    - kind: added
-      description: "Added self heal mechanism on vault unlock issues"
+    - kind: fixed
+      description: "Hardened BW CLI command parsing to avoid false failures on stderr output and malformed JSON responses"
+    - kind: fixed
+      description: "Added host reconciliation to verify BW_HOST against actual CLI server configuration before trusting local marker cache"
+    - kind: fixed
+      description: "Added authentication cooldown guard to prevent reconcile timer storms during repeated auth failures"
+    - kind: fixed
+      description: "Handled 'already logged in' API key login responses as non-fatal and continued unlock flow"
   artifacthub.io/images: |
     - name: bitwarden-crd-operator
-      image: ghcr.io/lerentis/bitwarden-crd-operator:0.17.0
+      image: docker.geekvetica.cloud/infra/bitwarden-crd-operator:auth-fix-20260404-1

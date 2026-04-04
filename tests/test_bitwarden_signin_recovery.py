@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,43 @@ from unittest.mock import patch
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+
+
+def _fake_startup(*args, **kwargs):
+    def _decorator(fn):
+        return fn
+
+    return _decorator
+
+
+if "kopf" not in sys.modules:
+    kopf_module = types.ModuleType("kopf")
+    kopf_module.on = types.SimpleNamespace(startup=_fake_startup)
+    kopf_module.append_owner_reference = lambda *args, **kwargs: None
+    sys.modules["kopf"] = kopf_module
+
+if "kubernetes" not in sys.modules:
+    kubernetes_module = types.ModuleType("kubernetes")
+    kubernetes_module.client = types.SimpleNamespace(
+        CoreV1Api=lambda: None,
+        V1ObjectMeta=lambda **kwargs: kwargs,
+    )
+    sys.modules["kubernetes"] = kubernetes_module
+
+if "schedule" not in sys.modules:
+    schedule_module = types.ModuleType("schedule")
+
+    class _Every:
+        @property
+        def seconds(self):
+            return self
+
+        def do(self, *args, **kwargs):
+            return None
+
+    schedule_module.every = lambda *args, **kwargs: _Every()
+    schedule_module.run_pending = lambda: None
+    sys.modules["schedule"] = schedule_module
 
 import bitwardenCrdOperator as operator  # noqa: E402
 
@@ -35,11 +73,15 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         os.environ.pop("BW_HOST", None)
         os.environ.pop("BW_SESSION", None)
         os.environ.pop("BW_AUTH_FAILURE_THRESHOLD", None)
+        os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
+        operator.record_auth_success()
 
     def tearDown(self):
         operator.auth_failures = self.original_auth_failures
         os.environ.pop("BW_AUTH_FAILURE_THRESHOLD", None)
+        os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
         os.environ.pop("BW_SESSION", None)
+        operator.record_auth_success()
 
     @patch("bitwardenCrdOperator.command_wrapper")
     def test_signin_success_resets_failure_counter(self, command_wrapper_mock):
@@ -137,6 +179,68 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
 
         operator.bitwarden_signin(self.logger)
 
+        self.assertEqual(operator.auth_failures, 1)
+
+    @patch("bitwardenCrdOperator.command_wrapper")
+    def test_already_logged_in_does_not_count_as_auth_failure(
+        self, command_wrapper_mock
+    ):
+        command_wrapper_mock.side_effect = [
+            {
+                "success": False,
+                "message": "You are already logged in as user@example.com.",
+            },
+            {"data": {"template": {"status": "unlocked"}}},
+        ]
+
+        operator.bitwarden_signin(self.logger)
+
+        self.assertEqual(operator.auth_failures, 0)
+
+    @patch("bitwardenCrdOperator.command_wrapper")
+    def test_configure_bw_host_recovers_marker_mismatch_with_actual_server(
+        self, command_wrapper_mock
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker_file = Path(temp_dir) / ".bw_host"
+            marker_file.write_text("https://stale-marker.example.com", encoding="utf-8")
+            os.environ["BW_HOST"] = "https://expected.example.com"
+
+            command_wrapper_mock.side_effect = [
+                {
+                    "success": True,
+                    "data": {"template": "https://actual-other.example.com"},
+                },
+                {"success": True},
+                {"success": True, "data": {"template": "https://expected.example.com"}},
+            ]
+
+            with patch(
+                "bitwardenCrdOperator.os.path.expanduser", return_value=temp_dir
+            ):
+                operator._configure_bw_host(self.logger)
+
+            self.assertEqual(
+                marker_file.read_text(encoding="utf-8"),
+                "https://expected.example.com",
+            )
+            command_wrapper_mock.assert_any_call(
+                self.logger,
+                "config server https://expected.example.com",
+                use_success=False,
+            )
+
+    @patch("bitwardenCrdOperator.command_wrapper")
+    def test_auth_cooldown_blocks_repeated_auth_attempts(self, command_wrapper_mock):
+        os.environ["BW_AUTH_COOLDOWN_SECONDS"] = "60"
+
+        with patch("utils.utils.time.monotonic", return_value=100.0):
+            operator.record_auth_failure()
+
+        with patch("utils.utils.time.monotonic", return_value=105.0):
+            operator.bitwarden_signin(self.logger)
+
+        command_wrapper_mock.assert_not_called()
         self.assertEqual(operator.auth_failures, 1)
 
 
