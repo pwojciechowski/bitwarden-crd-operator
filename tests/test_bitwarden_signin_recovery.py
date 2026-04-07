@@ -243,6 +243,63 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         command_wrapper_mock.assert_not_called()
         self.assertEqual(operator.auth_failures, 1)
 
+    @patch("bitwardenCrdOperator.command_wrapper")
+    def test_configured_bw_host_parses_cli_data_string_shape(
+        self, command_wrapper_mock
+    ):
+        command_wrapper_mock.return_value = {
+            "success": True,
+            "data": {"object": "string", "data": "https://vault.example.com"},
+        }
+
+        configured_host = operator._configured_bw_host(self.logger)
+
+        self.assertEqual(configured_host, "https://vault.example.com")
+
+    @patch("bitwardenCrdOperator.command_wrapper")
+    def test_configure_bw_host_retries_with_logout_when_verification_fails(
+        self, command_wrapper_mock
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["BW_HOST"] = "https://expected.example.com"
+            command_wrapper_mock.side_effect = [
+                {
+                    "success": True,
+                    "data": {
+                        "object": "string",
+                        "data": "https://bitwarden.com",
+                    },
+                },
+                {"success": True},
+                {
+                    "success": True,
+                    "data": {
+                        "object": "string",
+                        "data": "https://bitwarden.com",
+                    },
+                },
+                {"success": True},
+                {"success": True},
+                {
+                    "success": True,
+                    "data": {
+                        "object": "string",
+                        "data": "https://expected.example.com",
+                    },
+                },
+            ]
+
+            with patch(
+                "bitwardenCrdOperator.os.path.expanduser", return_value=temp_dir
+            ):
+                operator._configure_bw_host(self.logger)
+
+        command_wrapper_mock.assert_any_call(
+            self.logger,
+            "logout",
+            use_success=False,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

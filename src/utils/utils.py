@@ -69,21 +69,107 @@ def unlock_bw(logger):
             record_auth_failure()
             raise BitwardenCommandException("Failed to get bw status")
 
-        status = status_output["data"]["template"]["status"]
+        status = _extract_bw_status(status_output)
+        if status is None:
+            record_auth_failure()
+            raise BitwardenCommandException("Failed to parse bw status")
+
         if status == "unlocked":
             record_auth_success()
             if "DEBUG" in dict(os.environ):
                 logger.info("Already unlocked")
             return
 
+        if status == "unauthenticated":
+            login_result = command_wrapper(logger, "login --apikey", use_success=False)
+            if login_result is None or not isinstance(login_result, dict):
+                record_auth_failure()
+                raise BitwardenCommandException("bw login failed")
+
+            login_success = login_result.get("success")
+            if login_success is False and not _is_already_logged_in(login_result):
+                record_auth_failure()
+                raise BitwardenCommandException("bw login failed")
+
+            status_output = command_wrapper(logger, "status", False)
+            if status_output is None:
+                record_auth_failure()
+                raise BitwardenCommandException("Failed to get bw status")
+
+            status = _extract_bw_status(status_output)
+            if status is None:
+                record_auth_failure()
+                raise BitwardenCommandException("Failed to parse bw status")
+
+            if status == "unlocked":
+                record_auth_success()
+                if "DEBUG" in dict(os.environ):
+                    logger.info("Already unlocked")
+                return
+
+        if status != "locked":
+            record_auth_failure()
+            raise BitwardenCommandException(f"Unexpected bw status: {status}")
+
         token_output = command_wrapper(logger, "unlock --passwordenv BW_PASSWORD")
         if token_output is None:
             record_auth_failure()
             raise BitwardenCommandException("Failed to unlock vault")
 
-        os.environ["BW_SESSION"] = token_output["data"]["raw"]
+        token = token_output.get("data", {}).get("raw")
+        if token is None:
+            record_auth_failure()
+            raise BitwardenCommandException("Failed to read session token")
+
+        os.environ["BW_SESSION"] = token
         record_auth_success()
         logger.info("Signin successful. Session exported")
+
+
+def _extract_bw_status(status_output):
+    if not isinstance(status_output, dict):
+        return None
+
+    data = status_output.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    template = data.get("template")
+    if not isinstance(template, dict):
+        return None
+
+    status = template.get("status")
+    if isinstance(status, str):
+        return status
+
+    return None
+
+
+def _is_already_logged_in(login_result):
+    data = (
+        login_result.get("data", {})
+        if isinstance(login_result.get("data"), dict)
+        else {}
+    )
+    messages = [
+        login_result.get("message"),
+        login_result.get("error"),
+        login_result.get("errorMessage"),
+        data.get("message"),
+        data.get("error"),
+    ]
+
+    for message in messages:
+        if isinstance(message, str) and "already logged in" in message.lower():
+            return True
+
+    return False
+
+
+def should_skip_due_to_auth_cooldown(exc):
+    return isinstance(exc, BitwardenCommandException) and str(exc).startswith(
+        "Authentication cooldown active"
+    )
 
 
 def command_wrapper(logger, command, use_success: bool = True, raw: bool = False):

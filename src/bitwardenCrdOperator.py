@@ -48,6 +48,13 @@ def _configure_bw_host(logger):
                 configured_host = _configured_bw_host(logger)
 
             if configured_host != bw_host_env:
+                command_wrapper(logger, "logout", use_success=False)
+                command_wrapper(
+                    logger, f"config server {bw_host_env}", use_success=False
+                )
+                configured_host = _configured_bw_host(logger)
+
+            if configured_host != bw_host_env:
                 logger.warn(
                     f"Failed to configure Bitwarden server. expected={bw_host_env}, actual={configured_host}"
                 )
@@ -87,6 +94,10 @@ def _configured_bw_host(logger):
         for key in ("server", "url", "value"):
             if key in template_value:
                 return _normalize_host(template_value.get(key))
+
+    data_value = data.get("data")
+    if isinstance(data_value, str):
+        return _normalize_host(data_value)
 
     raw_value = data.get("raw")
     if isinstance(raw_value, str):

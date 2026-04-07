@@ -54,6 +54,7 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
 
     def tearDown(self):
         os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
+        os.environ.pop("BW_SESSION", None)
         utils.record_auth_success()
 
     @patch("utils.utils.subprocess.Popen")
@@ -86,6 +87,42 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
                 utils.unlock_bw(self.logger)
 
         self.assertEqual(command_wrapper_mock.call_count, 1)
+
+    @patch("utils.utils.command_wrapper")
+    def test_unlock_bw_unauthenticated_logs_in_and_unlocks(self, command_wrapper_mock):
+        command_wrapper_mock.side_effect = [
+            {"data": {"template": {"status": "unauthenticated"}}},
+            {"success": True},
+            {"data": {"template": {"status": "locked"}}},
+            {"data": {"raw": "fresh-session"}},
+        ]
+
+        utils.unlock_bw(self.logger)
+
+        self.assertEqual(os.environ.get("BW_SESSION"), "fresh-session")
+        command_wrapper_mock.assert_any_call(
+            self.logger,
+            "login --apikey",
+            use_success=False,
+        )
+
+    @patch("utils.utils.command_wrapper")
+    def test_unlock_bw_unauthenticated_handles_already_logged_in(
+        self, command_wrapper_mock
+    ):
+        command_wrapper_mock.side_effect = [
+            {"data": {"template": {"status": "unauthenticated"}}},
+            {
+                "success": False,
+                "message": "You are already logged in as user@example.com.",
+            },
+            {"data": {"template": {"status": "locked"}}},
+            {"data": {"raw": "fresh-session"}},
+        ]
+
+        utils.unlock_bw(self.logger)
+
+        self.assertEqual(os.environ.get("BW_SESSION"), "fresh-session")
 
 
 if __name__ == "__main__":

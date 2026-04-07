@@ -1,8 +1,12 @@
-from utils.utils import get_secret_from_bitwarden, get_attachment, parse_fields_scope, parse_login_scope
+from utils.utils import (
+    get_secret_from_bitwarden,
+    get_attachment,
+    parse_fields_scope,
+    parse_login_scope,
+)
 
 
 class BitwardenLookupHandler:
-
     def __init__(self, logger) -> None:
         self.logger = logger
 
