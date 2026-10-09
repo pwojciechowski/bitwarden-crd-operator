@@ -128,11 +128,11 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         self.assertEqual(operator.auth_failures, 0)
         self.assertEqual(os.environ.get("BW_SESSION"), "new-session")
 
-    @patch("bitwardenCrdOperator.sys.exit")
+    @patch("bitwardenCrdOperator.os._exit")
     @patch("bitwardenCrdOperator.recover_auth_state")
     @patch("bitwardenCrdOperator.command_wrapper")
     def test_recovery_failure_exits_process(
-        self, command_wrapper_mock, recover_auth_state_mock, sys_exit_mock
+        self, command_wrapper_mock, recover_auth_state_mock, os_exit_mock
     ):
         os.environ["BW_AUTH_FAILURE_THRESHOLD"] = "1"
         command_wrapper_mock.side_effect = [None, None]
@@ -140,7 +140,31 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         operator.bitwarden_signin(self.logger)
 
         recover_auth_state_mock.assert_called_once_with(self.logger)
-        sys_exit_mock.assert_called_once_with(1)
+        os_exit_mock.assert_called_once_with(1)
+
+    @patch("bitwardenCrdOperator._login_and_unlock")
+    @patch("bitwardenCrdOperator._configure_bw_host")
+    @patch("bitwardenCrdOperator.recover_auth_state")
+    def test_recovery_reconfigures_host_before_recovery_login(
+        self, recover_auth_state_mock, configure_host_mock, login_mock
+    ):
+        os.environ["BW_AUTH_FAILURE_THRESHOLD"] = "1"
+        calls = []
+        recover_auth_state_mock.side_effect = lambda logger: calls.append("recover")
+        configure_host_mock.side_effect = lambda logger: calls.append("configure_host")
+
+        def login(logger, skip_cooldown=False):
+            calls.append("recovery_login" if skip_cooldown else "login")
+            return (skip_cooldown, None if skip_cooldown else "bw login failed")
+
+        login_mock.side_effect = login
+
+        operator.bitwarden_signin(self.logger)
+
+        self.assertEqual(
+            calls,
+            ["configure_host", "login", "recover", "configure_host", "recovery_login"],
+        )
 
     def test_invalid_threshold_uses_default_without_exception_control_flow(self):
         os.environ["BW_AUTH_FAILURE_THRESHOLD"] = "invalid"

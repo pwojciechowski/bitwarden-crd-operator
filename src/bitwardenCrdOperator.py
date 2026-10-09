@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import os
-import sys
 import kopf
 import schedule
 import time
@@ -229,6 +228,9 @@ def bitwarden_signin(logger, **kwargs):
         "Authentication failure threshold reached, recovering Bitwarden auth state"
     )
     recover_auth_state(logger)
+    # recover_auth_state removed data.json, which holds the server URL. Without
+    # this the recovery login goes to vault.bitwarden.com (Lerentis#133).
+    _configure_bw_host(logger)
 
     recovery_ok, recovery_error = _login_and_unlock(logger, skip_cooldown=True)
     if recovery_ok:
@@ -238,7 +240,9 @@ def bitwarden_signin(logger, **kwargs):
 
     logger.error(f"Authentication recovery failed: {recovery_error}")
     logger.error("Stopping operator process after failed authentication recovery")
-    sys.exit(1)
+    # Runs in the schedule thread, where sys.exit only ends that thread and
+    # leaves the operator up but logged out (Lerentis#134).
+    os._exit(1)
 
 
 def run_continuously(interval=30):
