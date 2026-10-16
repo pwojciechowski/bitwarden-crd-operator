@@ -1,5 +1,8 @@
 import os
 import json
+import math
+import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -9,7 +12,13 @@ import kopf
 bw_sync_interval = float(os.environ.get("BW_SYNC_INTERVAL", 900))
 
 DEFAULT_AUTH_COOLDOWN_SECONDS = 30.0
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
+MAX_COMMAND_TIMEOUT_SECONDS = 3600.0
+KILL_REAP_TIMEOUT_SECONDS = 5.0
 bw_auth_lock = threading.Lock()
+# Every bw process reads and rewrites data.json; two at once corrupt it
+# ("Malformed JSON in file"), which logs the CLI out. Run them one by one.
+bw_command_lock = threading.Lock()
 _last_auth_failure_at = 0.0
 
 
@@ -22,9 +31,22 @@ def _str_to_bool(value):
     return normalized_value in ("1", "true", "t", "yes", "y", "on")
 
 
+def _rejects_option_like(logger, **values):
+    """CR fields become bw arguments; one starting with '-' could pass for
+    an option, so refuse it."""
+    for field, value in values.items():
+        if str(value).startswith("-"):
+            logger.warn(f"Refusing {field} that starts with '-': {value!r}")
+            return True
+    return False
+
+
 def get_secret_from_bitwarden(logger, id, force_sync=False):
+    id = str(id)
+    if _rejects_option_like(logger, id=id):
+        return None
     sync_bw(logger, force=force_sync)
-    return command_wrapper(logger, command=f"get item {id}")
+    return command_wrapper(logger, command=["get", "item", id])
 
 
 def sync_bw(logger, force=False):
@@ -51,8 +73,11 @@ def sync_bw(logger, force=False):
 
 
 def get_attachment(logger, id, name):
+    id, name = str(id), str(name)
+    if _rejects_option_like(logger, id=id, name=name):
+        return None
     return command_wrapper(
-        logger, command=f"get attachment {name} --itemid {id}", raw=True
+        logger, command=["get", "attachment", name, "--itemid", id], raw=True
     )
 
 
@@ -172,18 +197,65 @@ def should_skip_due_to_auth_cooldown(exc):
     )
 
 
+def _kill_and_reap(logger, sp):
+    """Kill bw's whole process group and collect its output. Never raises,
+    so neither a timeout nor the error that led here gets replaced."""
+    try:
+        os.killpg(sp.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        return sp.communicate(timeout=KILL_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # A descendant outside the group still holds a pipe: give up on it.
+        for pipe in (sp.stdout, sp.stderr):
+            if pipe:
+                pipe.close()
+        try:
+            sp.wait(timeout=KILL_REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warn(f"bw process {sp.pid} did not exit after SIGKILL")
+        return b"", b""
+
+
 def command_wrapper(logger, command, use_success: bool = True, raw: bool = False):
-    system_env = dict(os.environ)
+    """Run one bw command. `command` is a fixed string such as "sync", or a
+    list when it carries values from a CR, which then stay single arguments.
+    No shell is involved."""
     response_flag = "--raw" if raw else "--response"
-    sp = subprocess.Popen(
-        [f"bw {response_flag} {command}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        close_fds=True,
-        shell=True,
-        env=system_env,
-    )
-    out, err = sp.communicate()
+    args = shlex.split(command) if isinstance(command, str) else list(command)
+    argv = ["bw", response_flag, *args]
+    command_line = " ".join(argv)
+    timeout = _command_timeout_seconds(logger)
+    with bw_command_lock:
+        # Read the environment only once it is this call's turn: BW_SESSION
+        # may have been replaced while it waited.
+        system_env = dict(os.environ)
+        try:
+            sp = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+                env=system_env,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            logger.warn(f"bw could not start ({exc}): {command_line}")
+            return None
+        try:
+            out, err = sp.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_and_reap(logger, sp)
+            logger.warn(
+                f"bw command timed out after {timeout:g}s and was killed: "
+                f"{command_line}"
+            )
+            return None
+        except BaseException:
+            # Never leave a bw process running once the lock is released.
+            _kill_and_reap(logger, sp)
+            raise
 
     stdout = (
         out.decode(encoding="UTF-8", errors="replace")
@@ -198,7 +270,7 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
 
     if sp.returncode != 0:
         logger.warn(
-            f"bw command failed (returncode={sp.returncode}): bw {response_flag} {command}"
+            f"bw command failed (returncode={sp.returncode}): {command_line}"
         )
         if stderr.strip():
             logger.warn(f"bw stderr: {stderr.strip()}")
@@ -219,7 +291,7 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
         resp = json.loads(stdout)
     except json.JSONDecodeError:
         logger.warn(
-            f"bw command returned non-JSON output: bw {response_flag} {command}"
+            f"bw command returned non-JSON output: {command_line}"
         )
         if stdout.strip():
             logger.warn(f"bw stdout: {stdout.strip()}")
@@ -231,6 +303,23 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
 
     logger.warn(resp)
     return None
+
+
+def _command_timeout_seconds(logger):
+    configured_timeout = os.environ.get(
+        "BW_COMMAND_TIMEOUT", str(DEFAULT_COMMAND_TIMEOUT_SECONDS)
+    )
+    try:
+        timeout_seconds = float(configured_timeout)
+        if math.isfinite(timeout_seconds) and timeout_seconds > 0:
+            return min(timeout_seconds, MAX_COMMAND_TIMEOUT_SECONDS)
+    except ValueError:
+        pass
+
+    logger.warn(
+        f"Invalid BW_COMMAND_TIMEOUT '{configured_timeout}', using {DEFAULT_COMMAND_TIMEOUT_SECONDS}"
+    )
+    return DEFAULT_COMMAND_TIMEOUT_SECONDS
 
 
 def _auth_cooldown_seconds(logger):

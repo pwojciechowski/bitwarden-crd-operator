@@ -396,7 +396,7 @@ spec:
 
 #### Advanced Jinja2 Features
 
-Since templates use Jinja2, you can use control structures:
+Templates are rendered in Jinja2's immutable sandbox: attributes starting with `_` and methods that change lists or dicts (such as `.append`) are not available. If a `bitwarden_lookup` fails, rendering fails and the Secret keeps its previous value. Within those limits you can use control structures:
 
 ```yaml
 template: |
@@ -447,6 +447,7 @@ The operator can be configured using environment variables, either directly in `
 | `BW_RELOGIN_INTERVAL` | How long to keep session unlocked / re-login interval (seconds) | `3600` (1 hour) | No |
 | `BW_AUTH_FAILURE_THRESHOLD` | Consecutive auth failures before forcing logout/cache reset and relogin | `3` | No |
 | `BW_FORCE_SYNC` | Force sync before every secret retrieval | `false` | No |
+| `BW_COMMAND_TIMEOUT` | Seconds before a `bw` CLI call is killed and treated as failed (finite, capped at 3600). `bw` calls run one at a time, so a hung call would otherwise block all of them | `120` | No |
 | `DEBUG` | Enable debug logging | - | No |
 
 ### Sync Behavior

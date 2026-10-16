@@ -17,11 +17,16 @@ from utils.utils import (
     update_secret,
 )
 from lookups.bitwarden_lookup import BitwardenLookupHandler
-from jinja2 import Environment, BaseLoader
+from jinja2 import BaseLoader
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 
 def render_template(logger, template):
-    jinja_template = Environment(loader=BaseLoader()).from_string(template)
+    # Templates come from CRs; sandboxed so they cannot reach Python internals
+    # (and through them the operator's environment and credentials).
+    jinja_template = ImmutableSandboxedEnvironment(loader=BaseLoader()).from_string(
+        template
+    )
     jinja_template.globals.update(
         {
             "bitwarden_lookup": BitwardenLookupHandler(logger).bitwarden_lookup,
