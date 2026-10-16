@@ -41,6 +41,21 @@ if "kubernetes" not in sys.modules:
 from utils import utils  # noqa: E402
 
 
+def _process_gone(pid, wait_seconds=2.0):
+    """True once pid has exited. A zombie counts as gone: under a PID 1
+    that does not reap orphans (kopf in the image) it never disappears."""
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        try:
+            with open(f"/proc/{pid}/stat") as stat:
+                if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except FileNotFoundError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
 class DummyLogger:
     def __init__(self):
         self.messages = []
@@ -227,9 +242,7 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         self.assertLess(elapsed, 5)
         with open(pid_file) as f:
             child_pid = int(f.read())
-        time.sleep(0.1)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        self.assertTrue(_process_gone(child_pid), "the hung bw's child still runs")
         self.assertEqual(utils.command_wrapper(self.logger, "status"), {"success": True})
 
     def _ok_process(self, popen_mock):
@@ -292,6 +305,46 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
 
         commands = [call.args[0] for call in popen_mock.call_args_list]
         self.assertFalse(any(argv[2] == "get" for argv in commands), commands)
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_command_wrapper_fails_softly_when_bw_cannot_start(self, popen_mock):
+        popen_mock.side_effect = FileNotFoundError("bw")
+
+        self.assertIsNone(utils.command_wrapper(self.logger, "status"))
+        self.assertFalse(utils.bw_command_lock.locked())
+        self.assertTrue(any("could not start" in m for _, m in self.logger.messages))
+
+    @patch("utils.utils.os.killpg")
+    @patch("utils.utils.subprocess.Popen")
+    def test_timeout_still_returns_none_when_the_killed_bw_will_not_exit(
+        self, popen_mock, killpg_mock
+    ):
+        os.environ["BW_COMMAND_TIMEOUT"] = "1"
+        process = MagicMock()
+        process.pid = 4244
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="bw", timeout=1),
+            subprocess.TimeoutExpired(cmd="bw", timeout=5),
+        ]
+        process.wait.side_effect = subprocess.TimeoutExpired(cmd="bw", timeout=5)
+        popen_mock.return_value = process
+
+        self.assertIsNone(utils.command_wrapper(self.logger, "sync"))
+        self.assertTrue(any("did not exit" in m for _, m in self.logger.messages))
+
+    @patch("utils.utils.os.killpg")
+    @patch("utils.utils.subprocess.Popen")
+    def test_kill_of_an_already_gone_group_keeps_the_original_error(
+        self, popen_mock, killpg_mock
+    ):
+        killpg_mock.side_effect = ProcessLookupError()
+        process = MagicMock()
+        process.pid = 4245
+        process.communicate.side_effect = [OverflowError("original"), (b"", b"")]
+        popen_mock.return_value = process
+
+        with self.assertRaisesRegex(OverflowError, "original"):
+            utils.command_wrapper(self.logger, "sync")
 
     @patch("utils.utils.command_wrapper")
     def test_unlock_bw_cooldown_blocks_repeated_attempts(self, command_wrapper_mock):

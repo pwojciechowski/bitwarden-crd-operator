@@ -197,9 +197,13 @@ def should_skip_due_to_auth_cooldown(exc):
     )
 
 
-def _kill_and_reap(sp):
-    """Kill bw's whole process group and collect its output."""
-    os.killpg(sp.pid, signal.SIGKILL)
+def _kill_and_reap(logger, sp):
+    """Kill bw's whole process group and collect its output. Never raises,
+    so neither a timeout nor the error that led here gets replaced."""
+    try:
+        os.killpg(sp.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     try:
         return sp.communicate(timeout=KILL_REAP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
@@ -207,7 +211,10 @@ def _kill_and_reap(sp):
         for pipe in (sp.stdout, sp.stderr):
             if pipe:
                 pipe.close()
-        sp.wait(timeout=KILL_REAP_TIMEOUT_SECONDS)
+        try:
+            sp.wait(timeout=KILL_REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warn(f"bw process {sp.pid} did not exit after SIGKILL")
         return b"", b""
 
 
@@ -224,18 +231,22 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
         # Read the environment only once it is this call's turn: BW_SESSION
         # may have been replaced while it waited.
         system_env = dict(os.environ)
-        sp = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            env=system_env,
-            start_new_session=True,
-        )
+        try:
+            sp = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+                env=system_env,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            logger.warn(f"bw could not start ({exc}): {command_line}")
+            return None
         try:
             out, err = sp.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _kill_and_reap(sp)
+            _kill_and_reap(logger, sp)
             logger.warn(
                 f"bw command timed out after {timeout:g}s and was killed: "
                 f"{command_line}"
@@ -243,7 +254,7 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
             return None
         except BaseException:
             # Never leave a bw process running once the lock is released.
-            _kill_and_reap(sp)
+            _kill_and_reap(logger, sp)
             raise
 
     stdout = (
