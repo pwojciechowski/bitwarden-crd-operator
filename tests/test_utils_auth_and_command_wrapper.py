@@ -273,6 +273,16 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         )
 
     @patch("utils.utils.subprocess.Popen")
+    def test_non_string_cr_values_become_string_arguments(self, popen_mock):
+        self._ok_process(popen_mock)
+
+        utils.get_secret_from_bitwarden(self.logger, 123)
+        self.assertEqual(popen_mock.call_args.args[0][-1], "123")
+
+        utils.get_attachment(self.logger, 456, 789)
+        self.assertEqual(popen_mock.call_args.args[0][-4:], ["attachment", "789", "--itemid", "456"])
+
+    @patch("utils.utils.subprocess.Popen")
     def test_cr_values_that_look_like_options_are_rejected(self, popen_mock):
         self._ok_process(popen_mock)
 

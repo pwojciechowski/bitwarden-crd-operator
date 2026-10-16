@@ -42,6 +42,7 @@ def _rejects_option_like(logger, **values):
 
 
 def get_secret_from_bitwarden(logger, id, force_sync=False):
+    id = str(id)
     if _rejects_option_like(logger, id=id):
         return None
     sync_bw(logger, force=force_sync)
@@ -72,6 +73,7 @@ def sync_bw(logger, force=False):
 
 
 def get_attachment(logger, id, name):
+    id, name = str(id), str(name)
     if _rejects_option_like(logger, id=id, name=name):
         return None
     return command_wrapper(
