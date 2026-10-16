@@ -232,6 +232,57 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
             os.kill(child_pid, 0)
         self.assertEqual(utils.command_wrapper(self.logger, "status"), {"success": True})
 
+    def _ok_process(self, popen_mock):
+        process = MagicMock()
+        process.returncode = 0
+        process.communicate.return_value = (b'{"success": true}', b"")
+        popen_mock.return_value = process
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_command_wrapper_runs_bw_without_a_shell(self, popen_mock):
+        self._ok_process(popen_mock)
+
+        utils.command_wrapper(self.logger, "unlock --passwordenv BW_PASSWORD")
+
+        self.assertEqual(
+            popen_mock.call_args.args[0],
+            ["bw", "--response", "unlock", "--passwordenv", "BW_PASSWORD"],
+        )
+        self.assertFalse(popen_mock.call_args.kwargs.get("shell", False))
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_item_id_from_a_cr_cannot_inject_shell_commands(self, popen_mock):
+        self._ok_process(popen_mock)
+        hostile = "abc; touch /tmp/pwned $(id)"
+
+        utils.get_secret_from_bitwarden(self.logger, hostile)
+
+        argv = popen_mock.call_args_list[-1].args[0]
+        self.assertEqual(argv, ["bw", "--response", "get", "item", hostile])
+        self.assertFalse(popen_mock.call_args.kwargs.get("shell", False))
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_attachment_name_and_item_id_are_single_arguments(self, popen_mock):
+        self._ok_process(popen_mock)
+
+        utils.get_attachment(self.logger, "item-1", "my file; rm -rf /")
+
+        self.assertEqual(
+            popen_mock.call_args.args[0],
+            ["bw", "--raw", "get", "attachment", "my file; rm -rf /", "--itemid", "item-1"],
+        )
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_cr_values_that_look_like_options_are_rejected(self, popen_mock):
+        self._ok_process(popen_mock)
+
+        self.assertIsNone(utils.get_secret_from_bitwarden(self.logger, "--session=x"))
+        self.assertIsNone(utils.get_attachment(self.logger, "item-1", "-x"))
+        self.assertIsNone(utils.get_attachment(self.logger, "--help", "file"))
+
+        commands = [call.args[0] for call in popen_mock.call_args_list]
+        self.assertFalse(any(argv[2] == "get" for argv in commands), commands)
+
     @patch("utils.utils.command_wrapper")
     def test_unlock_bw_cooldown_blocks_repeated_attempts(self, command_wrapper_mock):
         os.environ["BW_AUTH_COOLDOWN_SECONDS"] = "30"

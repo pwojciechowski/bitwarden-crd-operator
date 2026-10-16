@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import shlex
 import signal
 import subprocess
 import threading
@@ -30,9 +31,21 @@ def _str_to_bool(value):
     return normalized_value in ("1", "true", "t", "yes", "y", "on")
 
 
+def _rejects_option_like(logger, **values):
+    """CR fields become bw arguments; one starting with '-' could pass for
+    an option, so refuse it."""
+    for field, value in values.items():
+        if str(value).startswith("-"):
+            logger.warn(f"Refusing {field} that starts with '-': {value!r}")
+            return True
+    return False
+
+
 def get_secret_from_bitwarden(logger, id, force_sync=False):
+    if _rejects_option_like(logger, id=id):
+        return None
     sync_bw(logger, force=force_sync)
-    return command_wrapper(logger, command=f"get item {id}")
+    return command_wrapper(logger, command=["get", "item", id])
 
 
 def sync_bw(logger, force=False):
@@ -59,8 +72,10 @@ def sync_bw(logger, force=False):
 
 
 def get_attachment(logger, id, name):
+    if _rejects_option_like(logger, id=id, name=name):
+        return None
     return command_wrapper(
-        logger, command=f"get attachment {name} --itemid {id}", raw=True
+        logger, command=["get", "attachment", name, "--itemid", id], raw=True
     )
 
 
@@ -181,7 +196,7 @@ def should_skip_due_to_auth_cooldown(exc):
 
 
 def _kill_and_reap(sp):
-    """Kill bw's whole process group (shell=True) and collect its output."""
+    """Kill bw's whole process group and collect its output."""
     os.killpg(sp.pid, signal.SIGKILL)
     try:
         return sp.communicate(timeout=KILL_REAP_TIMEOUT_SECONDS)
@@ -195,18 +210,23 @@ def _kill_and_reap(sp):
 
 
 def command_wrapper(logger, command, use_success: bool = True, raw: bool = False):
+    """Run one bw command. `command` is a fixed string such as "sync", or a
+    list when it carries values from a CR, which then stay single arguments.
+    No shell is involved."""
     response_flag = "--raw" if raw else "--response"
+    args = shlex.split(command) if isinstance(command, str) else list(command)
+    argv = ["bw", response_flag, *args]
+    command_line = " ".join(argv)
     timeout = _command_timeout_seconds(logger)
     with bw_command_lock:
         # Read the environment only once it is this call's turn: BW_SESSION
         # may have been replaced while it waited.
         system_env = dict(os.environ)
         sp = subprocess.Popen(
-            [f"bw {response_flag} {command}"],
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             close_fds=True,
-            shell=True,
             env=system_env,
             start_new_session=True,
         )
@@ -216,7 +236,7 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
             _kill_and_reap(sp)
             logger.warn(
                 f"bw command timed out after {timeout:g}s and was killed: "
-                f"bw {response_flag} {command}"
+                f"{command_line}"
             )
             return None
         except BaseException:
@@ -237,7 +257,7 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
 
     if sp.returncode != 0:
         logger.warn(
-            f"bw command failed (returncode={sp.returncode}): bw {response_flag} {command}"
+            f"bw command failed (returncode={sp.returncode}): {command_line}"
         )
         if stderr.strip():
             logger.warn(f"bw stderr: {stderr.strip()}")
@@ -258,7 +278,7 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
         resp = json.loads(stdout)
     except json.JSONDecodeError:
         logger.warn(
-            f"bw command returned non-JSON output: bw {response_flag} {command}"
+            f"bw command returned non-JSON output: {command_line}"
         )
         if stdout.strip():
             logger.warn(f"bw stdout: {stdout.strip()}")
