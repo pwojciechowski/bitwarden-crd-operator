@@ -61,5 +61,28 @@ class TemplateRenderingTests(unittest.TestCase):
             )
 
 
+    def _lookup_globals(self):
+        # lookups.bitwarden_lookup was imported under patch.dict; reach its
+        # module globals through the method instead of sys.modules.
+        return template.BitwardenLookupHandler.bitwarden_lookup.__globals__
+
+    def test_failed_attachment_lookup_fails_rendering_instead_of_writing_none(self):
+        # A timed-out bw returns None; rendering it would put "None" in the Secret.
+        with patch.dict(self._lookup_globals(), {"get_attachment": lambda *a: None}):
+            with self.assertRaises(template.BitwardenCommandException):
+                template.render_template(
+                    self.logger, '{{ bitwarden_lookup("item-1", "attachment", "key.pem") }}'
+                )
+
+    def test_failed_item_lookup_fails_rendering(self):
+        with patch.dict(
+            self._lookup_globals(), {"get_secret_from_bitwarden": lambda *a, **k: None}
+        ):
+            with self.assertRaises(template.BitwardenCommandException):
+                template.render_template(
+                    self.logger, '{{ bitwarden_lookup("item-1", "login", "password") }}'
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
