@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import signal
 import subprocess
 import threading
@@ -11,6 +12,8 @@ bw_sync_interval = float(os.environ.get("BW_SYNC_INTERVAL", 900))
 
 DEFAULT_AUTH_COOLDOWN_SECONDS = 30.0
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
+MAX_COMMAND_TIMEOUT_SECONDS = 3600.0
+KILL_REAP_TIMEOUT_SECONDS = 5.0
 bw_auth_lock = threading.Lock()
 # Every bw process reads and rewrites data.json; two at once corrupt it
 # ("Malformed JSON in file"), which logs the CLI out. Run them one by one.
@@ -177,11 +180,27 @@ def should_skip_due_to_auth_cooldown(exc):
     )
 
 
+def _kill_and_reap(sp):
+    """Kill bw's whole process group (shell=True) and collect its output."""
+    os.killpg(sp.pid, signal.SIGKILL)
+    try:
+        return sp.communicate(timeout=KILL_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # A descendant outside the group still holds a pipe: give up on it.
+        for pipe in (sp.stdout, sp.stderr):
+            if pipe:
+                pipe.close()
+        sp.wait(timeout=KILL_REAP_TIMEOUT_SECONDS)
+        return b"", b""
+
+
 def command_wrapper(logger, command, use_success: bool = True, raw: bool = False):
-    system_env = dict(os.environ)
     response_flag = "--raw" if raw else "--response"
     timeout = _command_timeout_seconds(logger)
     with bw_command_lock:
+        # Read the environment only once it is this call's turn: BW_SESSION
+        # may have been replaced while it waited.
+        system_env = dict(os.environ)
         sp = subprocess.Popen(
             [f"bw {response_flag} {command}"],
             stdout=subprocess.PIPE,
@@ -194,14 +213,16 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
         try:
             out, err = sp.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            # shell=True: kill the whole group so the Node process dies too.
-            os.killpg(sp.pid, signal.SIGKILL)
-            sp.communicate()
+            _kill_and_reap(sp)
             logger.warn(
                 f"bw command timed out after {timeout:g}s and was killed: "
                 f"bw {response_flag} {command}"
             )
             return None
+        except BaseException:
+            # Never leave a bw process running once the lock is released.
+            _kill_and_reap(sp)
+            raise
 
     stdout = (
         out.decode(encoding="UTF-8", errors="replace")
@@ -257,8 +278,8 @@ def _command_timeout_seconds(logger):
     )
     try:
         timeout_seconds = float(configured_timeout)
-        if timeout_seconds > 0:
-            return timeout_seconds
+        if math.isfinite(timeout_seconds) and timeout_seconds > 0:
+            return min(timeout_seconds, MAX_COMMAND_TIMEOUT_SECONDS)
     except ValueError:
         pass
 

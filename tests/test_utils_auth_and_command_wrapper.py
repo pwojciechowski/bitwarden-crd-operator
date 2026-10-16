@@ -1,5 +1,7 @@
 import os
+import shutil
 import signal
+import tempfile
 import subprocess
 import sys
 import threading
@@ -54,6 +56,7 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
     def setUp(self):
         self.logger = DummyLogger()
         os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
+        os.environ.pop("BW_COMMAND_TIMEOUT", None)
         utils.record_auth_success()
 
     def tearDown(self):
@@ -150,6 +153,84 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         utils.command_wrapper(self.logger, "status")
 
         self.assertEqual(process.communicate.call_args.kwargs, {"timeout": 120.0})
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_command_wrapper_uses_the_environment_current_when_it_runs(
+        self, popen_mock
+    ):
+        # A call queued behind the lock must not reuse a session that was
+        # replaced while it waited.
+        process = MagicMock()
+        process.returncode = 0
+        process.communicate.return_value = (b'{"success": true}', b"")
+        popen_mock.return_value = process
+        os.environ["BW_SESSION"] = "old-session"
+
+        utils.bw_command_lock.acquire()
+        waiting = threading.Thread(
+            target=utils.command_wrapper, args=(self.logger, "sync")
+        )
+        waiting.start()
+        time.sleep(0.05)
+        os.environ["BW_SESSION"] = "new-session"
+        utils.bw_command_lock.release()
+        waiting.join()
+
+        self.assertEqual(popen_mock.call_args.kwargs["env"]["BW_SESSION"], "new-session")
+
+    def test_command_timeout_rejects_non_finite_and_caps_large_values(self):
+        for configured, expected in (("inf", 120.0), ("nan", 120.0), ("-1", 120.0),
+                                     ("abc", 120.0), ("99999", 3600.0), ("30", 30.0)):
+            os.environ["BW_COMMAND_TIMEOUT"] = configured
+            self.assertEqual(utils._command_timeout_seconds(self.logger), expected, configured)
+
+    @patch("utils.utils.os.killpg")
+    @patch("utils.utils.subprocess.Popen")
+    def test_command_wrapper_kills_the_process_on_an_unexpected_error(
+        self, popen_mock, killpg_mock
+    ):
+        process = MagicMock()
+        process.pid = 4243
+        process.communicate.side_effect = [OverflowError("boom"), (b"", b"")]
+        popen_mock.return_value = process
+
+        with self.assertRaises(OverflowError):
+            utils.command_wrapper(self.logger, "sync")
+
+        killpg_mock.assert_called_once_with(4243, signal.SIGKILL)
+        self.assertFalse(utils.bw_command_lock.locked())
+
+    def test_command_wrapper_really_kills_a_hung_bw_and_frees_the_lock(self):
+        # Real processes: a fake bw that starts a sleeping child in its group.
+        bin_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bin_dir)
+        pid_file = os.path.join(bin_dir, "child.pid")
+        fake_bw = os.path.join(bin_dir, "bw")
+        with open(fake_bw, "w") as f:
+            f.write(
+                "#!/bin/sh\n"
+                'if [ "$2" = "status" ]; then echo \'{"success": true}\'; exit 0; fi\n'
+                f"sleep 30 & echo $! > {pid_file}\n"
+                "wait\n"
+            )
+        os.chmod(fake_bw, 0o755)
+        original_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}:{original_path}"
+        self.addCleanup(os.environ.__setitem__, "PATH", original_path)
+        os.environ["BW_COMMAND_TIMEOUT"] = "0.5"
+
+        started = time.monotonic()
+        result = utils.command_wrapper(self.logger, "sync")
+        elapsed = time.monotonic() - started
+
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 5)
+        with open(pid_file) as f:
+            child_pid = int(f.read())
+        time.sleep(0.1)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child_pid, 0)
+        self.assertEqual(utils.command_wrapper(self.logger, "status"), {"success": True})
 
     @patch("utils.utils.command_wrapper")
     def test_unlock_bw_cooldown_blocks_repeated_attempts(self, command_wrapper_mock):
