@@ -396,7 +396,7 @@ spec:
 
 #### Advanced Jinja2 Features
 
-Since templates use Jinja2, you can use control structures:
+Templates are rendered in Jinja2's immutable sandbox: attributes starting with `_` and methods that change lists or dicts (such as `.append`) are not available. If a `bitwarden_lookup` fails, rendering fails and the Secret keeps its previous value. Within those limits you can use control structures:
 
 ```yaml
 template: |
