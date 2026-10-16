@@ -1,4 +1,6 @@
 import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -110,6 +112,44 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
 
         self.assertEqual(popen_mock.call_count, 4)
         self.assertEqual(state["max"], 1)
+
+    @patch("utils.utils.os.killpg")
+    @patch("utils.utils.subprocess.Popen")
+    def test_command_wrapper_kills_a_hung_bw_call_and_fails_it(
+        self, popen_mock, killpg_mock
+    ):
+        # A hung bw process would otherwise hold the command lock forever.
+        os.environ["BW_COMMAND_TIMEOUT"] = "5"
+        self.addCleanup(os.environ.pop, "BW_COMMAND_TIMEOUT", None)
+        process = MagicMock()
+        process.pid = 4242
+        process.returncode = -9
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="bw", timeout=5),
+            (b"", b""),
+        ]
+        popen_mock.return_value = process
+
+        result = utils.command_wrapper(self.logger, "sync")
+
+        self.assertIsNone(result)
+        self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
+        self.assertEqual(process.communicate.call_args_list[0].kwargs, {"timeout": 5.0})
+        killpg_mock.assert_called_once_with(4242, signal.SIGKILL)
+        self.assertTrue(
+            any("timed out after 5" in message for _, message in self.logger.messages)
+        )
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_command_wrapper_default_timeout_is_120_seconds(self, popen_mock):
+        process = MagicMock()
+        process.returncode = 0
+        process.communicate.return_value = (b'{"success": true}', b"")
+        popen_mock.return_value = process
+
+        utils.command_wrapper(self.logger, "status")
+
+        self.assertEqual(process.communicate.call_args.kwargs, {"timeout": 120.0})
 
     @patch("utils.utils.command_wrapper")
     def test_unlock_bw_cooldown_blocks_repeated_attempts(self, command_wrapper_mock):

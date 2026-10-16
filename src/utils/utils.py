@@ -1,5 +1,6 @@
 import os
 import json
+import signal
 import subprocess
 import threading
 import time
@@ -9,6 +10,7 @@ import kopf
 bw_sync_interval = float(os.environ.get("BW_SYNC_INTERVAL", 900))
 
 DEFAULT_AUTH_COOLDOWN_SECONDS = 30.0
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
 bw_auth_lock = threading.Lock()
 # Every bw process reads and rewrites data.json; two at once corrupt it
 # ("Malformed JSON in file"), which logs the CLI out. Run them one by one.
@@ -178,6 +180,7 @@ def should_skip_due_to_auth_cooldown(exc):
 def command_wrapper(logger, command, use_success: bool = True, raw: bool = False):
     system_env = dict(os.environ)
     response_flag = "--raw" if raw else "--response"
+    timeout = _command_timeout_seconds(logger)
     with bw_command_lock:
         sp = subprocess.Popen(
             [f"bw {response_flag} {command}"],
@@ -186,8 +189,19 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
             close_fds=True,
             shell=True,
             env=system_env,
+            start_new_session=True,
         )
-        out, err = sp.communicate()
+        try:
+            out, err = sp.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # shell=True: kill the whole group so the Node process dies too.
+            os.killpg(sp.pid, signal.SIGKILL)
+            sp.communicate()
+            logger.warn(
+                f"bw command timed out after {timeout:g}s and was killed: "
+                f"bw {response_flag} {command}"
+            )
+            return None
 
     stdout = (
         out.decode(encoding="UTF-8", errors="replace")
@@ -235,6 +249,23 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
 
     logger.warn(resp)
     return None
+
+
+def _command_timeout_seconds(logger):
+    configured_timeout = os.environ.get(
+        "BW_COMMAND_TIMEOUT", str(DEFAULT_COMMAND_TIMEOUT_SECONDS)
+    )
+    try:
+        timeout_seconds = float(configured_timeout)
+        if timeout_seconds > 0:
+            return timeout_seconds
+    except ValueError:
+        pass
+
+    logger.warn(
+        f"Invalid BW_COMMAND_TIMEOUT '{configured_timeout}', using {DEFAULT_COMMAND_TIMEOUT_SECONDS}"
+    )
+    return DEFAULT_COMMAND_TIMEOUT_SECONDS
 
 
 def _auth_cooldown_seconds(logger):
