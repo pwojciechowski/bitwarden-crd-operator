@@ -50,7 +50,8 @@ def _process_gone(pid, wait_seconds=2.0):
             with open(f"/proc/{pid}/stat") as stat:
                 if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
                     return True
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # Gone before, or while, /proc/<pid>/stat was read.
             return True
         time.sleep(0.05)
     return False
