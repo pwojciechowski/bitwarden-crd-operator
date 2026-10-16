@@ -10,6 +10,9 @@ bw_sync_interval = float(os.environ.get("BW_SYNC_INTERVAL", 900))
 
 DEFAULT_AUTH_COOLDOWN_SECONDS = 30.0
 bw_auth_lock = threading.Lock()
+# Every bw process reads and rewrites data.json; two at once corrupt it
+# ("Malformed JSON in file"), which logs the CLI out. Run them one by one.
+bw_command_lock = threading.Lock()
 _last_auth_failure_at = 0.0
 
 
@@ -175,15 +178,16 @@ def should_skip_due_to_auth_cooldown(exc):
 def command_wrapper(logger, command, use_success: bool = True, raw: bool = False):
     system_env = dict(os.environ)
     response_flag = "--raw" if raw else "--response"
-    sp = subprocess.Popen(
-        [f"bw {response_flag} {command}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        close_fds=True,
-        shell=True,
-        env=system_env,
-    )
-    out, err = sp.communicate()
+    with bw_command_lock:
+        sp = subprocess.Popen(
+            [f"bw {response_flag} {command}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            shell=True,
+            env=system_env,
+        )
+        out, err = sp.communicate()
 
     stdout = (
         out.decode(encoding="UTF-8", errors="replace")

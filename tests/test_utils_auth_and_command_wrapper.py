@@ -1,5 +1,7 @@
 import os
 import sys
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -72,6 +74,42 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         self.assertTrue(
             any("non-JSON output" in message for _, message in self.logger.messages)
         )
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_command_wrapper_never_runs_two_bw_processes_at_once(self, popen_mock):
+        # Parallel bw processes rewrite data.json concurrently and corrupt it
+        # ("Malformed JSON in file"), which logs the CLI out.
+        state = {"running": 0, "max": 0}
+        state_lock = threading.Lock()
+
+        def make_process(*args, **kwargs):
+            process = MagicMock()
+            process.returncode = 0
+
+            def communicate(*a, **kw):
+                with state_lock:
+                    state["running"] += 1
+                    state["max"] = max(state["max"], state["running"])
+                time.sleep(0.05)
+                with state_lock:
+                    state["running"] -= 1
+                return (b'{"success": true}', b"")
+
+            process.communicate.side_effect = communicate
+            return process
+
+        popen_mock.side_effect = make_process
+        threads = [
+            threading.Thread(target=utils.command_wrapper, args=(self.logger, "sync"))
+            for _ in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(popen_mock.call_count, 4)
+        self.assertEqual(state["max"], 1)
 
     @patch("utils.utils.command_wrapper")
     def test_unlock_bw_cooldown_blocks_repeated_attempts(self, command_wrapper_mock):
