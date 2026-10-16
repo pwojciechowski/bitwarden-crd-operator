@@ -84,5 +84,26 @@ class TemplateRenderingTests(unittest.TestCase):
                 )
 
 
+    def test_missing_custom_field_fails_rendering(self):
+        item = {"data": {"fields": [{"name": "present", "value": "v"}]}}
+        with patch.dict(
+            self._lookup_globals(), {"get_secret_from_bitwarden": lambda *a, **k: item}
+        ):
+            with self.assertRaises(template.BitwardenCommandException):
+                template.render_template(
+                    self.logger, '{{ bitwarden_lookup("item-1", "fields", "missing") }}'
+                )
+
+    def test_unknown_scope_fails_rendering(self):
+        item = {"data": {"login": {"password": "p"}}}
+        with patch.dict(
+            self._lookup_globals(), {"get_secret_from_bitwarden": lambda *a, **k: item}
+        ):
+            with self.assertRaises(template.BitwardenCommandException):
+                template.render_template(
+                    self.logger, '{{ bitwarden_lookup("item-1", "bogus", "x") }}'
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
