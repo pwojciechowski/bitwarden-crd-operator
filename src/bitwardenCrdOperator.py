@@ -6,6 +6,7 @@ import time
 import threading
 
 from utils.utils import (
+    _extract_bw_status,
     auth_cooldown_remaining,
     bw_auth_lock,
     command_wrapper,
@@ -161,6 +162,10 @@ def _login_and_unlock(logger, skip_cooldown=False):
                 logger.info("Already unlocked")
             return True, ""
 
+        if status != "locked":
+            record_auth_failure()
+            return False, f"Unexpected bw status: {status}"
+
         token_output = command_wrapper(logger, "unlock --passwordenv BW_PASSWORD")
         if token_output is None or not isinstance(token_output, dict):
             record_auth_failure()
@@ -178,10 +183,7 @@ def _login_and_unlock(logger, skip_cooldown=False):
 
 
 def _bw_status(logger):
-    status_output = command_wrapper(logger, "status", False)
-    if status_output is None or not isinstance(status_output, dict):
-        return None
-    return status_output.get("data", {}).get("template", {}).get("status")
+    return _extract_bw_status(command_wrapper(logger, "status", False))
 
 
 def recover_auth_state(logger):

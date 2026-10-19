@@ -232,6 +232,26 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         recover_auth_state_mock.assert_not_called()
 
     @patch("bitwardenCrdOperator.command_wrapper")
+    def test_malformed_or_unknown_status_counts_as_auth_failure(
+        self, command_wrapper_mock
+    ):
+        for status_output in (
+            {"success": True, "data": None},
+            {"success": True, "data": {"template": None}},
+            {"success": True, "data": {"template": {"status": "weird"}}},
+        ):
+            with self.subTest(status_output=status_output):
+                operator.auth_failures = 0
+                operator.record_auth_success()
+                command_wrapper_mock.reset_mock()
+                command_wrapper_mock.side_effect = [status_output]
+
+                operator.bitwarden_signin(self.logger)
+
+                self.assertEqual(operator.auth_failures, 1)
+                self.assertEqual(command_wrapper_mock.call_count, 1)
+
+    @patch("bitwardenCrdOperator.command_wrapper")
     def test_logged_in_but_locked_unlocks_without_logging_in(
         self, command_wrapper_mock
     ):
