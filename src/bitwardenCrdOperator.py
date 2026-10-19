@@ -6,6 +6,7 @@ import time
 import threading
 
 from utils.utils import (
+    _extract_bw_status,
     auth_cooldown_remaining,
     bw_auth_lock,
     command_wrapper,
@@ -130,27 +131,40 @@ def _login_and_unlock(logger, skip_cooldown=False):
                 f"Authentication cooldown active for {cooldown_remaining:.1f}s",
             )
 
-        login_result = command_wrapper(logger, "login --apikey", use_success=False)
-        if login_result is None or not isinstance(login_result, dict):
-            record_auth_failure()
-            return False, "bw login failed"
-
-        login_success = login_result.get("success")
-        if login_success is False and not _is_already_logged_in(login_result):
-            record_auth_failure()
-            return False, "bw login failed"
-
-        status_output = command_wrapper(logger, "status", False)
-        if status_output is None or not isinstance(status_output, dict):
+        # Log in only when logged out: while a session exists, bw login exits
+        # non-zero ("You are already logged in"), which command_wrapper
+        # reports as None, so every scheduled relogin counted as a failure.
+        status = _bw_status(logger)
+        if status is None:
             record_auth_failure()
             return False, "Failed to get bw status"
 
-        status = status_output.get("data", {}).get("template", {}).get("status")
+        if status == "unauthenticated":
+            login_result = command_wrapper(
+                logger, "login --apikey", use_success=False
+            )
+            if login_result is None or not isinstance(login_result, dict):
+                record_auth_failure()
+                return False, "bw login failed"
+
+            if login_result.get("success") is False:
+                record_auth_failure()
+                return False, "bw login failed"
+
+            status = _bw_status(logger)
+            if status is None:
+                record_auth_failure()
+                return False, "Failed to get bw status"
+
         if status == "unlocked":
             record_auth_success()
             if "DEBUG" in dict(os.environ):
                 logger.info("Already unlocked")
             return True, ""
+
+        if status != "locked":
+            record_auth_failure()
+            return False, f"Unexpected bw status: {status}"
 
         token_output = command_wrapper(logger, "unlock --passwordenv BW_PASSWORD")
         if token_output is None or not isinstance(token_output, dict):
@@ -168,25 +182,8 @@ def _login_and_unlock(logger, skip_cooldown=False):
         return True, ""
 
 
-def _is_already_logged_in(login_result):
-    data = (
-        login_result.get("data", {})
-        if isinstance(login_result.get("data"), dict)
-        else {}
-    )
-    messages = [
-        login_result.get("message"),
-        login_result.get("error"),
-        login_result.get("errorMessage"),
-        data.get("message"),
-        data.get("error"),
-    ]
-
-    for message in messages:
-        if isinstance(message, str) and "already logged in" in message.lower():
-            return True
-
-    return False
+def _bw_status(logger):
+    return _extract_bw_status(command_wrapper(logger, "status", False))
 
 
 def recover_auth_state(logger):

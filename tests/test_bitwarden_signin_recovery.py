@@ -75,6 +75,13 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         os.environ.pop("BW_AUTH_FAILURE_THRESHOLD", None)
         os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
         operator.record_auth_success()
+        # A real os._exit would end the test run without a report.
+        exit_patcher = patch(
+            "bitwardenCrdOperator.os._exit",
+            side_effect=AssertionError("unexpected os._exit"),
+        )
+        exit_patcher.start()
+        self.addCleanup(exit_patcher.stop)
 
     def tearDown(self):
         operator.auth_failures = self.original_auth_failures
@@ -87,6 +94,7 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
     def test_signin_success_resets_failure_counter(self, command_wrapper_mock):
         operator.auth_failures = 2
         command_wrapper_mock.side_effect = [
+            {"data": {"template": {"status": "unauthenticated"}}},
             {"success": True},
             {"data": {"template": {"status": "unlocked"}}},
         ]
@@ -117,6 +125,7 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         operator.auth_failures = 1
         command_wrapper_mock.side_effect = [
             None,
+            {"data": {"template": {"status": "unauthenticated"}}},
             {"success": True},
             {"data": {"template": {"status": "locked"}}},
             {"data": {"raw": "new-session"}},
@@ -196,30 +205,67 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
 
     @patch("bitwardenCrdOperator.command_wrapper")
     def test_status_failure_counts_as_auth_failure(self, command_wrapper_mock):
-        command_wrapper_mock.side_effect = [
-            {"success": True},
-            None,
-        ]
+        command_wrapper_mock.side_effect = [None]
 
         operator.bitwarden_signin(self.logger)
 
         self.assertEqual(operator.auth_failures, 1)
 
+    @patch("bitwardenCrdOperator.recover_auth_state")
     @patch("bitwardenCrdOperator.command_wrapper")
-    def test_already_logged_in_does_not_count_as_auth_failure(
+    def test_scheduled_relogin_while_unlocked_does_not_count_as_auth_failure(
+        self, command_wrapper_mock, recover_auth_state_mock
+    ):
+        # Like the real command_wrapper: bw login exits 1 with "You are
+        # already logged in" while a session exists, and a non-zero exit
+        # returns None, not the JSON.
+        responses = {"status": {"data": {"template": {"status": "unlocked"}}}}
+        command_wrapper_mock.side_effect = (
+            lambda logger, command, *args, **kwargs: responses.get(command)
+        )
+        os.environ["BW_AUTH_FAILURE_THRESHOLD"] = "3"
+
+        for _ in range(3):
+            operator.bitwarden_signin(self.logger)
+
+        self.assertEqual(operator.auth_failures, 0)
+        recover_auth_state_mock.assert_not_called()
+
+    @patch("bitwardenCrdOperator.command_wrapper")
+    def test_malformed_or_unknown_status_counts_as_auth_failure(
+        self, command_wrapper_mock
+    ):
+        for status_output in (
+            {"success": True, "data": None},
+            {"success": True, "data": {"template": None}},
+            {"success": True, "data": {"template": {"status": "weird"}}},
+        ):
+            with self.subTest(status_output=status_output):
+                operator.auth_failures = 0
+                operator.record_auth_success()
+                command_wrapper_mock.reset_mock()
+                command_wrapper_mock.side_effect = [status_output]
+
+                operator.bitwarden_signin(self.logger)
+
+                self.assertEqual(operator.auth_failures, 1)
+                self.assertEqual(command_wrapper_mock.call_count, 1)
+
+    @patch("bitwardenCrdOperator.command_wrapper")
+    def test_logged_in_but_locked_unlocks_without_logging_in(
         self, command_wrapper_mock
     ):
         command_wrapper_mock.side_effect = [
-            {
-                "success": False,
-                "message": "You are already logged in as user@example.com.",
-            },
-            {"data": {"template": {"status": "unlocked"}}},
+            {"data": {"template": {"status": "locked"}}},
+            {"data": {"raw": "new-session"}},
         ]
 
         operator.bitwarden_signin(self.logger)
 
         self.assertEqual(operator.auth_failures, 0)
+        self.assertEqual(os.environ.get("BW_SESSION"), "new-session")
+        commands = [c.args[1] for c in command_wrapper_mock.call_args_list]
+        self.assertNotIn("login --apikey", commands)
 
     @patch("bitwardenCrdOperator.command_wrapper")
     def test_configure_bw_host_recovers_marker_mismatch_with_actual_server(
