@@ -75,6 +75,13 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         os.environ.pop("BW_AUTH_FAILURE_THRESHOLD", None)
         os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
         operator.record_auth_success()
+        # A real os._exit would end the test run without a report.
+        exit_patcher = patch(
+            "bitwardenCrdOperator.os._exit",
+            side_effect=AssertionError("unexpected os._exit"),
+        )
+        exit_patcher.start()
+        self.addCleanup(exit_patcher.stop)
 
     def tearDown(self):
         operator.auth_failures = self.original_auth_failures
