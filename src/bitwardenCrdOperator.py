@@ -213,8 +213,10 @@ def bitwarden_signin(logger, **kwargs):
     logger.warn(
         "Authentication failure threshold reached, recovering Bitwarden auth state"
     )
-    # Log out keeping data.json first; delete it (a new device) only when that
-    # recovery fails too, e.g. because the file is corrupt (#108).
+    # Log out keeping data.json (the device ID) first. Delete it (a new device)
+    # only when that fails on local CLI state: a refused login (an outage, a
+    # rejected key) is not fixed by a reset. The CLI itself empties a file
+    # that is not valid JSON (#108).
     for reset_cli_data in (False, True):
         recover_auth_state(logger, reset_cli_data=reset_cli_data)
         # A reset data.json loses the server URL. Without this the recovery
@@ -227,7 +229,10 @@ def bitwarden_signin(logger, **kwargs):
             logger.info("Authentication recovery succeeded")
             return
 
-        logger.error(f"Authentication recovery failed: {recovery_error}")
+        step = "after CLI data reset" if reset_cli_data else "with kept CLI data"
+        logger.error(f"Authentication recovery failed ({step}): {recovery_error}")
+        if recovery_error == LOGIN_FAILED:
+            break
 
     logger.error("Stopping operator process after failed authentication recovery")
     # Runs in the schedule thread, where sys.exit only ends that thread and
