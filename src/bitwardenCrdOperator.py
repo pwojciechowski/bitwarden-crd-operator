@@ -226,31 +226,53 @@ def bitwarden_signin(logger, **kwargs):
     os._exit(1)
 
 
-def _sync_stale_seconds(logger):
-    default = STALE_SYNC_INTERVALS * float(os.environ.get("BW_SYNC_INTERVAL", 900))
-    configured = os.environ.get("BW_SYNC_STALE_SECONDS")
+DEFAULT_SYNC_INTERVAL_SECONDS = 900.0
+_warned_settings = set()
+
+
+def _positive_seconds(logger, name, default):
+    """A finite, positive float from the environment, else the default.
+    Warns once per setting: the probe reads it every 10 s."""
+    configured = os.environ.get(name)
     if configured is None:
         return default
     try:
-        stale_seconds = float(configured)
-        if math.isfinite(stale_seconds) and stale_seconds > 0:
-            return stale_seconds
+        seconds = float(configured)
+        if math.isfinite(seconds) and seconds > 0:
+            return seconds
     except ValueError:
         pass
 
-    logger.warn(f"Invalid BW_SYNC_STALE_SECONDS '{configured}', using {default:g}")
+    if name not in _warned_settings:
+        _warned_settings.add(name)
+        logger.warn(f"Invalid {name} '{configured}', using {default:g}")
     return default
 
 
+def _sync_stale_seconds(logger):
+    sync_interval = _positive_seconds(
+        logger, "BW_SYNC_INTERVAL", DEFAULT_SYNC_INTERVAL_SECONDS
+    )
+    return _positive_seconds(
+        logger, "BW_SYNC_STALE_SECONDS", STALE_SYNC_INTERVALS * sync_interval
+    )
+
+
 @kopf.on.probe(id="bw_sync")
-def bw_sync_health(logger, **kwargs):
+async def bw_sync_health(logger, **kwargs):
     """Fails /healthz once no bw sync has succeeded for BW_SYNC_STALE_SECONDS
     (default: 3 sync intervals), so the kubelet restarts an operator that is
     alive but no longer syncing (#108: five days of /healthz and nothing else).
-    A PermanentError fails the probe at once; any other exception would make
-    kopf retry the probe until the kubelet's request timed out."""
-    sync_age = seconds_since_last_sync()
-    stale_seconds = _sync_stale_seconds(logger)
+
+    Async on purpose: kopf runs a sync handler in its thread pool, which the
+    CR timers fill during every pass, and /healthz would miss the kubelet's
+    1 s timeout. Only a PermanentError fails the probe at once; kopf retries
+    any other exception every 60 s while /healthz waits, so none escapes."""
+    try:
+        sync_age = seconds_since_last_sync()
+        stale_seconds = _sync_stale_seconds(logger)
+    except Exception as exc:
+        raise kopf.PermanentError(f"Sync health check failed: {exc}") from exc
     if sync_age > stale_seconds:
         raise kopf.PermanentError(
             f"No successful bw sync for {sync_age:.0f}s (limit {stale_seconds:g}s)"

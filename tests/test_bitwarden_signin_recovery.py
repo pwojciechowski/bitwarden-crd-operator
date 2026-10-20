@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import os
 import sys
 import tempfile
@@ -71,6 +73,7 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         self.logger = DummyLogger()
         self.original_auth_failures = operator.auth_failures
         operator.auth_failures = 0
+        operator._warned_settings.clear()
         os.environ.pop("BW_HOST", None)
         os.environ.pop("BW_SESSION", None)
         os.environ.pop("BW_AUTH_FAILURE_THRESHOLD", None)
@@ -407,7 +410,40 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
 
     def _probe_at(self, sync_age):
         with patch("bitwardenCrdOperator.seconds_since_last_sync", return_value=sync_age):
-            return operator.bw_sync_health(logger=self.logger)
+            return asyncio.run(operator.bw_sync_health(logger=self.logger))
+
+    def test_probe_runs_on_the_event_loop_not_in_the_handler_thread_pool(self):
+        # kopf runs a sync handler in its executor, which the CR timers fill
+        # during every pass: /healthz then missed the kubelet's 1 s timeout.
+        self.assertTrue(inspect.iscoroutinefunction(operator.bw_sync_health))
+
+    def test_probe_turns_an_unexpected_error_into_a_failed_probe(self):
+        # kopf retries any other exception every 60 s while /healthz waits.
+        with patch(
+            "bitwardenCrdOperator.seconds_since_last_sync",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(operator.kopf.PermanentError):
+                asyncio.run(operator.bw_sync_health(logger=self.logger))
+
+    def test_probe_ignores_an_unusable_sync_interval(self):
+        self.addCleanup(os.environ.pop, "BW_SYNC_INTERVAL", None)
+        for invalid in ("inf", "nan", "0", "-1", "abc"):
+            with self.subTest(invalid=invalid):
+                os.environ["BW_SYNC_INTERVAL"] = invalid
+                self.assertEqual(self._probe_at(2700), 2700)
+                with self.assertRaises(operator.kopf.PermanentError):
+                    self._probe_at(2701)
+
+    def test_probe_warns_about_an_invalid_limit_only_once(self):
+        os.environ["BW_SYNC_STALE_SECONDS"] = "abc"
+        self.addCleanup(os.environ.pop, "BW_SYNC_STALE_SECONDS", None)
+
+        for _ in range(3):
+            self._probe_at(1)
+
+        warnings = [m for level, m in self.logger.messages if "BW_SYNC_STALE_SECONDS" in m]
+        self.assertEqual(len(warnings), 1)
 
     def test_probe_reports_the_sync_age_while_syncs_succeed(self):
         os.environ["BW_SYNC_INTERVAL"] = "1800"

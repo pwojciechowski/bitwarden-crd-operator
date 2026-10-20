@@ -78,6 +78,7 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         utils.record_auth_success()
 
     def tearDown(self):
+        utils.record_sync_success()
         os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
         os.environ.pop("BW_SESSION", None)
         utils.record_auth_success()
