@@ -170,6 +170,39 @@ def _extract_bw_status(status_output):
     return None
 
 
+def normalize_host(host):
+    if host is None:
+        return None
+    return host.strip().rstrip("/")
+
+
+def parse_configured_server(config_output):
+    """The server URL from `bw config server` output, or None."""
+    if not isinstance(config_output, dict):
+        return None
+
+    data = config_output.get("data", {})
+    template_value = data.get("template")
+
+    if isinstance(template_value, str):
+        return normalize_host(template_value)
+
+    if isinstance(template_value, dict):
+        for key in ("server", "url", "value"):
+            if key in template_value:
+                return normalize_host(template_value.get(key))
+
+    data_value = data.get("data")
+    if isinstance(data_value, str):
+        return normalize_host(data_value)
+
+    raw_value = data.get("raw")
+    if isinstance(raw_value, str):
+        return normalize_host(raw_value)
+
+    return None
+
+
 def _is_already_logged_in(login_result):
     data = (
         login_result.get("data", {})
