@@ -405,5 +405,42 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         )
 
 
+    def _probe_at(self, sync_age):
+        with patch("bitwardenCrdOperator.seconds_since_last_sync", return_value=sync_age):
+            return operator.bw_sync_health(logger=self.logger)
+
+    def test_probe_reports_the_sync_age_while_syncs_succeed(self):
+        os.environ["BW_SYNC_INTERVAL"] = "1800"
+        self.addCleanup(os.environ.pop, "BW_SYNC_INTERVAL", None)
+
+        self.assertEqual(self._probe_at(1799.6), 1800)
+
+    def test_probe_fails_after_three_intervals_without_a_successful_sync(self):
+        # A Ready pod that never syncs (#108: five days of /healthz only)
+        # must fail liveness so the kubelet restarts it.
+        os.environ["BW_SYNC_INTERVAL"] = "1800"
+        self.addCleanup(os.environ.pop, "BW_SYNC_INTERVAL", None)
+
+        self.assertEqual(self._probe_at(5400), 5400)
+        with self.assertRaises(operator.kopf.PermanentError):
+            self._probe_at(5401)
+
+    def test_probe_limit_can_be_set_and_falls_back_on_invalid_values(self):
+        os.environ["BW_SYNC_INTERVAL"] = "100"
+        self.addCleanup(os.environ.pop, "BW_SYNC_INTERVAL", None)
+        self.addCleanup(os.environ.pop, "BW_SYNC_STALE_SECONDS", None)
+
+        os.environ["BW_SYNC_STALE_SECONDS"] = "1000"
+        self.assertEqual(self._probe_at(999), 999)
+        with self.assertRaises(operator.kopf.PermanentError):
+            self._probe_at(1001)
+
+        for invalid in ("abc", "0", "-5", "inf", "nan"):
+            with self.subTest(invalid=invalid):
+                os.environ["BW_SYNC_STALE_SECONDS"] = invalid
+                with self.assertRaises(operator.kopf.PermanentError):
+                    self._probe_at(301)
+
+
 if __name__ == "__main__":
     unittest.main()

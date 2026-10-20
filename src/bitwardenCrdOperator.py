@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import os
 import kopf
 import schedule
@@ -15,11 +16,13 @@ from utils.utils import (
     parse_configured_server,
     record_auth_failure,
     record_auth_success,
+    seconds_since_last_sync,
     sync_bw,
 )
 
 
 AUTH_FAILURE_THRESHOLD = 3
+STALE_SYNC_INTERVALS = 3
 auth_failures = 0
 
 
@@ -221,6 +224,38 @@ def bitwarden_signin(logger, **kwargs):
     # Runs in the schedule thread, where sys.exit only ends that thread and
     # leaves the operator up but logged out (Lerentis#134).
     os._exit(1)
+
+
+def _sync_stale_seconds(logger):
+    default = STALE_SYNC_INTERVALS * float(os.environ.get("BW_SYNC_INTERVAL", 900))
+    configured = os.environ.get("BW_SYNC_STALE_SECONDS")
+    if configured is None:
+        return default
+    try:
+        stale_seconds = float(configured)
+        if math.isfinite(stale_seconds) and stale_seconds > 0:
+            return stale_seconds
+    except ValueError:
+        pass
+
+    logger.warn(f"Invalid BW_SYNC_STALE_SECONDS '{configured}', using {default:g}")
+    return default
+
+
+@kopf.on.probe(id="bw_sync")
+def bw_sync_health(logger, **kwargs):
+    """Fails /healthz once no bw sync has succeeded for BW_SYNC_STALE_SECONDS
+    (default: 3 sync intervals), so the kubelet restarts an operator that is
+    alive but no longer syncing (#108: five days of /healthz and nothing else).
+    A PermanentError fails the probe at once; any other exception would make
+    kopf retry the probe until the kubelet's request timed out."""
+    sync_age = seconds_since_last_sync()
+    stale_seconds = _sync_stale_seconds(logger)
+    if sync_age > stale_seconds:
+        raise kopf.PermanentError(
+            f"No successful bw sync for {sync_age:.0f}s (limit {stale_seconds:g}s)"
+        )
+    return round(sync_age)
 
 
 def run_continuously(interval=30):

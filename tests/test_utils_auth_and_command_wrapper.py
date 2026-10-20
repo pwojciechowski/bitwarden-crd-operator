@@ -492,5 +492,26 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         self.assertIn("login --apikey", self._commands(command_wrapper_mock))
 
 
+    @patch("utils.utils.command_wrapper")
+    def test_a_successful_sync_resets_the_sync_age(self, command_wrapper_mock):
+        # The liveness probe reads this age (#108 plan B3).
+        command_wrapper_mock.return_value = {"success": True}
+        with patch("utils.utils.time.monotonic", return_value=1000.0):
+            utils.sync_bw(self.logger)
+        with patch("utils.utils.time.monotonic", return_value=1030.0):
+            self.assertEqual(utils.seconds_since_last_sync(), 30.0)
+
+    @patch("utils.utils.command_wrapper")
+    def test_a_failed_sync_does_not_reset_the_sync_age(self, command_wrapper_mock):
+        command_wrapper_mock.return_value = {"success": True}
+        with patch("utils.utils.time.monotonic", return_value=1000.0):
+            utils.sync_bw(self.logger)
+        command_wrapper_mock.return_value = None
+        with patch("utils.utils.time.monotonic", return_value=2000.0):
+            utils.sync_bw(self.logger)
+        with patch("utils.utils.time.monotonic", return_value=2500.0):
+            self.assertEqual(utils.seconds_since_last_sync(), 1500.0)
+
+
 if __name__ == "__main__":
     unittest.main()
