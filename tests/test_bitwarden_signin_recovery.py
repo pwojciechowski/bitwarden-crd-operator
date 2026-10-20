@@ -6,7 +6,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
@@ -137,7 +137,7 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
 
         operator.bitwarden_signin(self.logger)
 
-        recover_auth_state_mock.assert_called_once_with(self.logger)
+        recover_auth_state_mock.assert_called_once_with(self.logger, reset_cli_data=False)
         self.assertEqual(operator.auth_failures, 0)
         self.assertEqual(os.environ.get("BW_SESSION"), "new-session")
 
@@ -148,12 +148,89 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         self, command_wrapper_mock, recover_auth_state_mock, os_exit_mock
     ):
         os.environ["BW_AUTH_FAILURE_THRESHOLD"] = "1"
-        command_wrapper_mock.side_effect = [None, None]
+        command_wrapper_mock.return_value = None
 
         operator.bitwarden_signin(self.logger)
 
-        recover_auth_state_mock.assert_called_once_with(self.logger)
+        self.assertEqual(
+            recover_auth_state_mock.call_args_list,
+            [
+                call(self.logger, reset_cli_data=False),
+                call(self.logger, reset_cli_data=True),
+            ],
+        )
         os_exit_mock.assert_called_once_with(1)
+
+    def test_recovery_resets_cli_data_only_after_a_local_state_failure(self):
+        # Geekvetica#108 B4: data.json holds the device ID, so deleting it on
+        # every recovery logged in as a new device and sent an email each time.
+        local_failures = [
+            "Failed to get bw status",
+            "Unexpected bw status: unknown",
+            "Failed to read session token",
+            "bw is configured for https://vault.bitwarden.com, not BW_HOST",
+        ]
+        for error in local_failures:
+            with self.subTest(error=error):
+                calls, exit_mock = self._recover_with_login_results(
+                    [(False, operator.LOGIN_FAILED), (False, error), (True, "")]
+                )
+
+                self.assertEqual(
+                    calls,
+                    [
+                        "configure_host", "login",
+                        "recover", "configure_host", "recovery_login",
+                        "reset", "configure_host", "recovery_login",
+                    ],
+                )
+                self.assertIn(
+                    ("error", f"Authentication recovery failed (with kept CLI data): {error}"),
+                    self.logger.messages,
+                )
+                self.assertEqual(operator.auth_failures, 0)
+                exit_mock.assert_not_called()
+
+    def test_recovery_keeps_cli_data_when_the_server_refuses_login_or_unlock(self):
+        # Both talk to Vaultwarden after a logout (unlock verifies the password
+        # there): an outage or a rejected credential is not fixed by a reset,
+        # which would only cost the device ID. Exit and let the pod restart.
+        for error in (operator.LOGIN_FAILED, operator.UNLOCK_FAILED):
+            with self.subTest(error=error):
+                calls, exit_mock = self._recover_with_login_results(
+                    [(False, operator.LOGIN_FAILED), (False, error)]
+                )
+
+                self.assertEqual(
+                    calls,
+                    ["configure_host", "login", "recover", "configure_host", "recovery_login"],
+                )
+                exit_mock.assert_called_once_with(1)
+
+    def _recover_with_login_results(self, results):
+        os.environ["BW_AUTH_FAILURE_THRESHOLD"] = "1"
+        operator.auth_failures = 0
+        self.logger = DummyLogger()
+        calls = []
+        attempts = iter(results)
+
+        def login(logger, skip_cooldown=False):
+            calls.append("recovery_login" if skip_cooldown else "login")
+            return next(attempts)
+
+        with patch(
+            "bitwardenCrdOperator.recover_auth_state",
+            side_effect=lambda logger, reset_cli_data=False: calls.append(
+                "reset" if reset_cli_data else "recover"
+            ),
+        ), patch(
+            "bitwardenCrdOperator._configure_bw_host",
+            side_effect=lambda logger: calls.append("configure_host"),
+        ), patch(
+            "bitwardenCrdOperator._login_and_unlock", side_effect=login
+        ), patch("bitwardenCrdOperator.os._exit") as exit_mock:
+            operator.bitwarden_signin(self.logger)
+        return calls, exit_mock
 
     @patch("bitwardenCrdOperator._login_and_unlock")
     @patch("bitwardenCrdOperator._configure_bw_host")
@@ -163,7 +240,9 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
     ):
         os.environ["BW_AUTH_FAILURE_THRESHOLD"] = "1"
         calls = []
-        recover_auth_state_mock.side_effect = lambda logger: calls.append("recover")
+        recover_auth_state_mock.side_effect = lambda logger, reset_cli_data=False: calls.append(
+            "reset" if reset_cli_data else "recover"
+        )
         configure_host_mock.side_effect = lambda logger: calls.append("configure_host")
 
         def login(logger, skip_cooldown=False):
@@ -186,10 +265,7 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
 
         self.assertEqual(threshold, operator.AUTH_FAILURE_THRESHOLD)
 
-    @patch("bitwardenCrdOperator.command_wrapper")
-    def test_recover_auth_state_clears_session_and_cache_file(
-        self, command_wrapper_mock
-    ):
+    def _recover_with_cli_data_file(self, **kwargs):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_file = Path(temp_dir) / ".config" / "Bitwarden CLI" / "data.json"
             data_file.parent.mkdir(parents=True, exist_ok=True)
@@ -198,14 +274,20 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
 
             with patch(
                 "bitwardenCrdOperator.os.path.expanduser", return_value=temp_dir
-            ):
-                operator.recover_auth_state(self.logger)
+            ), patch("bitwardenCrdOperator.command_wrapper") as command_wrapper_mock:
+                operator.recover_auth_state(self.logger, **kwargs)
 
             self.assertNotIn("BW_SESSION", os.environ)
-            self.assertFalse(data_file.exists())
             command_wrapper_mock.assert_called_once_with(
                 self.logger, "logout", use_success=False
             )
+            return data_file.exists()
+
+    def test_recover_auth_state_logs_out_and_keeps_the_cli_data_file(self):
+        self.assertTrue(self._recover_with_cli_data_file())
+
+    def test_recover_auth_state_with_reset_removes_the_cli_data_file(self):
+        self.assertFalse(self._recover_with_cli_data_file(reset_cli_data=True))
 
     @patch("bitwardenCrdOperator.command_wrapper")
     def test_status_failure_counts_as_auth_failure(self, command_wrapper_mock):

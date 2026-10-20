@@ -22,6 +22,11 @@ from utils.utils import (
 
 
 AUTH_FAILURE_THRESHOLD = 3
+LOGIN_FAILED = "bw login failed"
+UNLOCK_FAILED = "Failed to unlock vault"
+# Recovery failures Vaultwarden caused (an outage, a rejected credential): after
+# bw logout, unlock too verifies the password with the server.
+SERVER_REFUSALS = (LOGIN_FAILED, UNLOCK_FAILED)
 STALE_SYNC_INTERVALS = 3
 auth_failures = 0
 
@@ -129,11 +134,11 @@ def _login_and_unlock(logger, skip_cooldown=False):
             )
             if login_result is None or not isinstance(login_result, dict):
                 record_auth_failure()
-                return False, "bw login failed"
+                return False, LOGIN_FAILED
 
             if login_result.get("success") is False:
                 record_auth_failure()
-                return False, "bw login failed"
+                return False, LOGIN_FAILED
 
             status = _bw_status(logger)
             if status is None:
@@ -153,7 +158,7 @@ def _login_and_unlock(logger, skip_cooldown=False):
         token_output = command_wrapper(logger, "unlock --passwordenv BW_PASSWORD")
         if token_output is None or not isinstance(token_output, dict):
             record_auth_failure()
-            return False, "Failed to unlock vault"
+            return False, UNLOCK_FAILED
 
         token = token_output.get("data", {}).get("raw")
         if token is None:
@@ -170,9 +175,13 @@ def _bw_status(logger):
     return _extract_bw_status(command_wrapper(logger, "status", False))
 
 
-def recover_auth_state(logger):
+def recover_auth_state(logger, reset_cli_data=False):
+    """Logs out. bw logout keeps data.json and with it the device ID; only
+    reset_cli_data deletes it, so the next login is a new device (and an email)."""
     os.environ.pop("BW_SESSION", None)
     command_wrapper(logger, "logout", use_success=False)
+    if not reset_cli_data:
+        return
 
     home_dir = os.path.expanduser("~")
     cli_data_file = os.path.join(home_dir, ".config", "Bitwarden CLI", "data.json")
@@ -208,18 +217,26 @@ def bitwarden_signin(logger, **kwargs):
     logger.warn(
         "Authentication failure threshold reached, recovering Bitwarden auth state"
     )
-    recover_auth_state(logger)
-    # recover_auth_state removed data.json, which holds the server URL. Without
-    # this the recovery login goes to vault.bitwarden.com (Lerentis#133).
-    _configure_bw_host(logger)
+    # Log out keeping data.json (the device ID) first. Delete it (a new device)
+    # only when that fails on local CLI state: a server refusal is not fixed by
+    # a reset. The CLI itself empties a file that is not valid JSON (#108).
+    for reset_cli_data in (False, True):
+        recover_auth_state(logger, reset_cli_data=reset_cli_data)
+        # A reset data.json loses the server URL. Without this the recovery
+        # login goes to vault.bitwarden.com (Lerentis#133).
+        _configure_bw_host(logger)
 
-    recovery_ok, recovery_error = _login_and_unlock(logger, skip_cooldown=True)
-    if recovery_ok:
-        auth_failures = 0
-        logger.info("Authentication recovery succeeded")
-        return
+        recovery_ok, recovery_error = _login_and_unlock(logger, skip_cooldown=True)
+        if recovery_ok:
+            auth_failures = 0
+            logger.info("Authentication recovery succeeded")
+            return
 
-    logger.error(f"Authentication recovery failed: {recovery_error}")
+        step = "after CLI data reset" if reset_cli_data else "with kept CLI data"
+        logger.error(f"Authentication recovery failed ({step}): {recovery_error}")
+        if recovery_error in SERVER_REFUSALS:
+            break
+
     logger.error("Stopping operator process after failed authentication recovery")
     # Runs in the schedule thread, where sys.exit only ends that thread and
     # leaves the operator up but logged out (Lerentis#134).
