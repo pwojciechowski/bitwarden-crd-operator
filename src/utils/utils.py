@@ -106,6 +106,11 @@ def unlock_bw(logger):
             return
 
         if status == "unauthenticated":
+            refusal = apikey_login_refusal(logger)
+            if refusal is not None:
+                record_auth_failure()
+                raise BitwardenCommandException(refusal)
+
             login_result = command_wrapper(logger, "login --apikey", use_success=False)
             if login_result is None or not isinstance(login_result, dict):
                 record_auth_failure()
@@ -168,6 +173,65 @@ def _extract_bw_status(status_output):
         return status
 
     return None
+
+
+def normalize_host(host):
+    if not isinstance(host, str):
+        return None
+    return host.strip().rstrip("/")
+
+
+def parse_configured_server(config_output):
+    """The server URL from `bw config server` output, or None. Never raises:
+    a malformed response must refuse the API-key login, not escape it."""
+    if not isinstance(config_output, dict):
+        return None
+
+    data = config_output.get("data")
+    if not isinstance(data, dict):
+        return None
+    template_value = data.get("template")
+
+    if isinstance(template_value, str):
+        return normalize_host(template_value)
+
+    if isinstance(template_value, dict):
+        for key in ("server", "url", "value"):
+            if key in template_value:
+                return normalize_host(template_value.get(key))
+
+    data_value = data.get("data")
+    if isinstance(data_value, str):
+        return normalize_host(data_value)
+
+    raw_value = data.get("raw")
+    if isinstance(raw_value, str):
+        return normalize_host(raw_value)
+
+    return None
+
+
+def apikey_login_refusal(logger):
+    """Why the API key must not be sent now, or None. With BW_HOST set the
+    key goes only to that server: a reset data.json points the CLI at
+    bitwarden.com (Lerentis#133). Without BW_HOST the operator targets the
+    SaaS and there is nothing to check."""
+    expected = normalize_host(os.environ.get("BW_HOST"))
+    if not expected:
+        return None
+
+    configured = parse_configured_server(
+        command_wrapper(logger, "config server", use_success=False)
+    )
+    if configured == expected:
+        return None
+
+    message = (
+        f"Refusing API-key login: bw server is {configured!r}, "
+        f"BW_HOST is {expected!r}"
+    )
+    logger.warn(message)
+    return message
 
 
 def _is_already_logged_in(login_result):

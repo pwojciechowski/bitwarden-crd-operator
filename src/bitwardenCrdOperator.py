@@ -7,9 +7,12 @@ import threading
 
 from utils.utils import (
     _extract_bw_status,
+    apikey_login_refusal,
     auth_cooldown_remaining,
     bw_auth_lock,
     command_wrapper,
+    normalize_host as _normalize_host,
+    parse_configured_server,
     record_auth_failure,
     record_auth_success,
     sync_bw,
@@ -73,37 +76,10 @@ def _configure_bw_host(logger):
         logger.info("BW_HOST not set. Assuming SaaS installation")
 
 
-def _normalize_host(host):
-    if host is None:
-        return None
-    return host.strip().rstrip("/")
-
-
 def _configured_bw_host(logger):
-    config_output = command_wrapper(logger, "config server", use_success=False)
-    if not isinstance(config_output, dict):
-        return None
-
-    data = config_output.get("data", {})
-    template_value = data.get("template")
-
-    if isinstance(template_value, str):
-        return _normalize_host(template_value)
-
-    if isinstance(template_value, dict):
-        for key in ("server", "url", "value"):
-            if key in template_value:
-                return _normalize_host(template_value.get(key))
-
-    data_value = data.get("data")
-    if isinstance(data_value, str):
-        return _normalize_host(data_value)
-
-    raw_value = data.get("raw")
-    if isinstance(raw_value, str):
-        return _normalize_host(raw_value)
-
-    return None
+    return parse_configured_server(
+        command_wrapper(logger, "config server", use_success=False)
+    )
 
 
 def _auth_failure_threshold(logger):
@@ -140,6 +116,11 @@ def _login_and_unlock(logger, skip_cooldown=False):
             return False, "Failed to get bw status"
 
         if status == "unauthenticated":
+            refusal = apikey_login_refusal(logger)
+            if refusal is not None:
+                record_auth_failure()
+                return False, refusal
+
             login_result = command_wrapper(
                 logger, "login --apikey", use_success=False
             )

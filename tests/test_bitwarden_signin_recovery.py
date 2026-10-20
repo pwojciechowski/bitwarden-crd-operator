@@ -267,6 +267,39 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         commands = [c.args[1] for c in command_wrapper_mock.call_args_list]
         self.assertNotIn("login --apikey", commands)
 
+    @patch("utils.utils.command_wrapper")
+    @patch("bitwardenCrdOperator.command_wrapper")
+    def test_api_key_login_is_refused_when_bw_points_at_another_server(
+        self, command_wrapper_mock, utils_command_wrapper_mock
+    ):
+        # Geekvetica#108: after a data.json reset the CLI pointed at
+        # bitwarden.com and the API key went there ~300 times.
+        os.environ["BW_HOST"] = "https://vault.example.com"
+        self.addCleanup(os.environ.pop, "BW_HOST", None)
+        responses = {
+            "status": {"data": {"template": {"status": "unauthenticated"}}},
+            "config server": {
+                "success": True,
+                "data": {"object": "string", "data": "https://vault.bitwarden.com"},
+            },
+        }
+        for mock in (command_wrapper_mock, utils_command_wrapper_mock):
+            mock.side_effect = (
+                lambda logger, command, *args, **kwargs: responses.get(command)
+            )
+
+        signin_ok, signin_error = operator._login_and_unlock(self.logger)
+
+        self.assertFalse(signin_ok)
+        self.assertIn("server", signin_error)
+        commands = [
+            c.args[1]
+            for mock in (command_wrapper_mock, utils_command_wrapper_mock)
+            for c in mock.call_args_list
+        ]
+        self.assertNotIn("login --apikey", commands)
+        self.assertGreater(operator.auth_cooldown_remaining(self.logger), 0)
+
     @patch("bitwardenCrdOperator.command_wrapper")
     def test_configure_bw_host_recovers_marker_mismatch_with_actual_server(
         self, command_wrapper_mock

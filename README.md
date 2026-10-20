@@ -440,7 +440,7 @@ The operator can be configured using environment variables, either directly in `
 |----------|-------------|---------|----------|
 | `BW_EMAIL` | Bitwarden account email address | - | Yes |
 | `BW_PASSWORD` | Bitwarden master password | - | Yes |
-| `BW_HOST` | Bitwarden server URL (for self-hosted) | `https://api.bitwarden.com/` | No |
+| `BW_HOST` | Bitwarden server URL (for self-hosted). When set, the operator refuses `bw login --apikey` unless `bw config server` reports this URL, so the API key never goes to another server. Give the full URL with scheme, as `bw config server` prints it (a trailing `/` is ignored, case is not) | `https://api.bitwarden.com/` | No |
 | `BW_CLIENTID` | OAuth client ID (optional for some deployments) | - | No |
 | `BW_CLIENTSECRET` | OAuth client secret (optional) | - | No |
 | `BW_SYNC_INTERVAL` | How often to sync with Bitwarden (seconds) | `900` (15 min) | No |
