@@ -22,6 +22,7 @@ from utils.utils import (
 
 
 AUTH_FAILURE_THRESHOLD = 3
+LOGIN_FAILED = "bw login failed"
 STALE_SYNC_INTERVALS = 3
 auth_failures = 0
 
@@ -129,11 +130,11 @@ def _login_and_unlock(logger, skip_cooldown=False):
             )
             if login_result is None or not isinstance(login_result, dict):
                 record_auth_failure()
-                return False, "bw login failed"
+                return False, LOGIN_FAILED
 
             if login_result.get("success") is False:
                 record_auth_failure()
-                return False, "bw login failed"
+                return False, LOGIN_FAILED
 
             status = _bw_status(logger)
             if status is None:
