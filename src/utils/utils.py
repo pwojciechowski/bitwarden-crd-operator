@@ -176,17 +176,20 @@ def _extract_bw_status(status_output):
 
 
 def normalize_host(host):
-    if host is None:
+    if not isinstance(host, str):
         return None
     return host.strip().rstrip("/")
 
 
 def parse_configured_server(config_output):
-    """The server URL from `bw config server` output, or None."""
+    """The server URL from `bw config server` output, or None. Never raises:
+    a malformed response must refuse the API-key login, not escape it."""
     if not isinstance(config_output, dict):
         return None
 
-    data = config_output.get("data", {})
+    data = config_output.get("data")
+    if not isinstance(data, dict):
+        return None
     template_value = data.get("template")
 
     if isinstance(template_value, str):

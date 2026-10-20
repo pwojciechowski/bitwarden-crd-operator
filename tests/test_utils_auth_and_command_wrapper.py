@@ -73,6 +73,7 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         self.logger = DummyLogger()
         os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
         os.environ.pop("BW_COMMAND_TIMEOUT", None)
+        os.environ.pop("BW_HOST", None)
         utils.record_auth_success()
 
     def tearDown(self):
@@ -437,6 +438,46 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
             utils.unlock_bw(self.logger)
 
         self.assertNotIn("login --apikey", self._commands(command_wrapper_mock))
+
+    @patch("utils.utils.command_wrapper")
+    def test_unlock_bw_refuses_and_counts_a_malformed_server_response(
+        self, command_wrapper_mock
+    ):
+        os.environ["BW_HOST"] = "https://vault.example.com"
+        self.addCleanup(os.environ.pop, "BW_HOST", None)
+        for config_output in (
+            {"success": True, "data": None},
+            {"success": True, "data": {"template": {"server": 42}}},
+        ):
+            with self.subTest(config_output=config_output):
+                utils.record_auth_success()
+                command_wrapper_mock.reset_mock()
+                responses = {
+                    "status": {"data": {"template": {"status": "unauthenticated"}}},
+                    "config server": config_output,
+                }
+                command_wrapper_mock.side_effect = (
+                    lambda logger, command, *args, **kwargs: responses.get(command)
+                )
+
+                with self.assertRaisesRegex(utils.BitwardenCommandException, "server"):
+                    utils.unlock_bw(self.logger)
+
+                self.assertNotIn("login --apikey", self._commands(command_wrapper_mock))
+                self.assertGreater(utils.auth_cooldown_remaining(self.logger), 0)
+
+    @patch("utils.utils.command_wrapper")
+    def test_unlock_bw_without_bw_host_never_reads_the_server(
+        self, command_wrapper_mock
+    ):
+        self._bw_on_server(command_wrapper_mock, "https://vault.bitwarden.com")
+
+        with self.assertRaisesRegex(utils.BitwardenCommandException, "login failed"):
+            utils.unlock_bw(self.logger)
+
+        commands = self._commands(command_wrapper_mock)
+        self.assertIn("login --apikey", commands)
+        self.assertNotIn("config server", commands)
 
     @patch("utils.utils.command_wrapper")
     def test_unlock_bw_logs_in_when_the_server_is_bw_host(self, command_wrapper_mock):
