@@ -21,7 +21,8 @@ def _fake_startup(*args, **kwargs):
 
 if "kopf" not in sys.modules:
     kopf_module = types.ModuleType("kopf")
-    kopf_module.on = types.SimpleNamespace(startup=_fake_startup)
+    kopf_module.on = types.SimpleNamespace(startup=_fake_startup, probe=_fake_startup)
+    kopf_module.PermanentError = type("PermanentError", (Exception,), {})
     kopf_module.append_owner_reference = lambda *args, **kwargs: None
     sys.modules["kopf"] = kopf_module
 
