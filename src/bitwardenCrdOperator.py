@@ -24,6 +24,9 @@ from utils.utils import (
 AUTH_FAILURE_THRESHOLD = 3
 LOGIN_FAILED = "bw login failed"
 UNLOCK_FAILED = "Failed to unlock vault"
+# Recovery failures Vaultwarden caused (an outage, a rejected credential): after
+# bw logout, unlock too verifies the password with the server.
+SERVER_REFUSALS = (LOGIN_FAILED, UNLOCK_FAILED)
 STALE_SYNC_INTERVALS = 3
 auth_failures = 0
 
@@ -215,9 +218,8 @@ def bitwarden_signin(logger, **kwargs):
         "Authentication failure threshold reached, recovering Bitwarden auth state"
     )
     # Log out keeping data.json (the device ID) first. Delete it (a new device)
-    # only when that fails on local CLI state: a refused login (an outage, a
-    # rejected key) is not fixed by a reset. The CLI itself empties a file
-    # that is not valid JSON (#108).
+    # only when that fails on local CLI state: a server refusal is not fixed by
+    # a reset. The CLI itself empties a file that is not valid JSON (#108).
     for reset_cli_data in (False, True):
         recover_auth_state(logger, reset_cli_data=reset_cli_data)
         # A reset data.json loses the server URL. Without this the recovery
@@ -232,7 +234,7 @@ def bitwarden_signin(logger, **kwargs):
 
         step = "after CLI data reset" if reset_cli_data else "with kept CLI data"
         logger.error(f"Authentication recovery failed ({step}): {recovery_error}")
-        if recovery_error == LOGIN_FAILED:
+        if recovery_error in SERVER_REFUSALS:
             break
 
     logger.error("Stopping operator process after failed authentication recovery")

@@ -445,7 +445,7 @@ The operator can be configured using environment variables, either directly in `
 | `BW_CLIENTSECRET` | OAuth client secret (optional) | - | No |
 | `BW_SYNC_INTERVAL` | How often to sync with Bitwarden (seconds) | `900` (15 min) | No |
 | `BW_RELOGIN_INTERVAL` | How long to keep session unlocked / re-login interval (seconds) | `3600` (1 hour) | No |
-| `BW_AUTH_FAILURE_THRESHOLD` | Consecutive auth failures before recovery: logout and relogin keeping the CLI data (device ID), then, only if that fails on local CLI state (not a refused login), a cache reset and relogin as a new device | `3` | No |
+| `BW_AUTH_FAILURE_THRESHOLD` | Consecutive auth failures before recovery: logout and relogin keeping the CLI data (device ID), then, only if that fails on local CLI state (not a refused login or unlock), a cache reset and relogin as a new device | `3` | No |
 | `BW_FORCE_SYNC` | Force sync before every secret retrieval | `false` | No |
 | `BW_SYNC_STALE_SECONDS` | `/healthz` fails once no `bw sync` has succeeded for this long, so the liveness probe restarts an operator that is alive but no longer syncing. `/healthz` reports the current age as `bw_sync` | 3 × `BW_SYNC_INTERVAL` | No |
 | `BW_COMMAND_TIMEOUT` | Seconds before a `bw` CLI call is killed and treated as failed (finite, capped at 3600). `bw` calls run one at a time, so a hung call would otherwise block all of them | `120` | No |
