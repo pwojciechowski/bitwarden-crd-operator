@@ -398,6 +398,57 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
 
         self.assertEqual(os.environ.get("BW_SESSION"), "fresh-session")
 
+    def _bw_on_server(self, command_wrapper_mock, server):
+        responses = {
+            "status": {"data": {"template": {"status": "unauthenticated"}}},
+            "config server": {"success": True, "data": {"object": "string", "data": server}},
+        }
+        command_wrapper_mock.side_effect = (
+            lambda logger, command, *args, **kwargs: responses.get(command)
+        )
+
+    def _commands(self, command_wrapper_mock):
+        return [c.args[1] for c in command_wrapper_mock.call_args_list]
+
+    @patch("utils.utils.command_wrapper")
+    def test_unlock_bw_refuses_api_key_login_to_another_server(
+        self, command_wrapper_mock
+    ):
+        # Lerentis#133 / Geekvetica#108: a reset data.json points the CLI at
+        # bitwarden.com, and the API key went there ~300 times.
+        os.environ["BW_HOST"] = "https://vault.example.com"
+        self.addCleanup(os.environ.pop, "BW_HOST", None)
+        self._bw_on_server(command_wrapper_mock, "https://vault.bitwarden.com")
+
+        with self.assertRaisesRegex(utils.BitwardenCommandException, "server"):
+            utils.unlock_bw(self.logger)
+
+        self.assertNotIn("login --apikey", self._commands(command_wrapper_mock))
+
+    @patch("utils.utils.command_wrapper")
+    def test_unlock_bw_refuses_api_key_login_when_the_server_is_unreadable(
+        self, command_wrapper_mock
+    ):
+        os.environ["BW_HOST"] = "https://vault.example.com"
+        self.addCleanup(os.environ.pop, "BW_HOST", None)
+        self._bw_on_server(command_wrapper_mock, None)
+
+        with self.assertRaisesRegex(utils.BitwardenCommandException, "server"):
+            utils.unlock_bw(self.logger)
+
+        self.assertNotIn("login --apikey", self._commands(command_wrapper_mock))
+
+    @patch("utils.utils.command_wrapper")
+    def test_unlock_bw_logs_in_when_the_server_is_bw_host(self, command_wrapper_mock):
+        os.environ["BW_HOST"] = "https://vault.example.com/"
+        self.addCleanup(os.environ.pop, "BW_HOST", None)
+        self._bw_on_server(command_wrapper_mock, "https://vault.example.com")
+
+        with self.assertRaisesRegex(utils.BitwardenCommandException, "login failed"):
+            utils.unlock_bw(self.logger)
+
+        self.assertIn("login --apikey", self._commands(command_wrapper_mock))
+
 
 if __name__ == "__main__":
     unittest.main()

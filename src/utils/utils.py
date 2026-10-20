@@ -106,6 +106,11 @@ def unlock_bw(logger):
             return
 
         if status == "unauthenticated":
+            refusal = apikey_login_refusal(logger)
+            if refusal is not None:
+                record_auth_failure()
+                raise BitwardenCommandException(refusal)
+
             login_result = command_wrapper(logger, "login --apikey", use_success=False)
             if login_result is None or not isinstance(login_result, dict):
                 record_auth_failure()
@@ -201,6 +206,29 @@ def parse_configured_server(config_output):
         return normalize_host(raw_value)
 
     return None
+
+
+def apikey_login_refusal(logger):
+    """Why the API key must not be sent now, or None. With BW_HOST set the
+    key goes only to that server: a reset data.json points the CLI at
+    bitwarden.com (Lerentis#133). Without BW_HOST the operator targets the
+    SaaS and there is nothing to check."""
+    expected = normalize_host(os.environ.get("BW_HOST"))
+    if not expected:
+        return None
+
+    configured = parse_configured_server(
+        command_wrapper(logger, "config server", use_success=False)
+    )
+    if configured == expected:
+        return None
+
+    message = (
+        f"Refusing API-key login: bw server is {configured!r}, "
+        f"BW_HOST is {expected!r}"
+    )
+    logger.warn(message)
+    return message
 
 
 def _is_already_logged_in(login_result):
