@@ -23,6 +23,7 @@ from utils.utils import (
 
 AUTH_FAILURE_THRESHOLD = 3
 LOGIN_FAILED = "bw login failed"
+UNLOCK_FAILED = "Failed to unlock vault"
 STALE_SYNC_INTERVALS = 3
 auth_failures = 0
 
@@ -154,7 +155,7 @@ def _login_and_unlock(logger, skip_cooldown=False):
         token_output = command_wrapper(logger, "unlock --passwordenv BW_PASSWORD")
         if token_output is None or not isinstance(token_output, dict):
             record_auth_failure()
-            return False, "Failed to unlock vault"
+            return False, UNLOCK_FAILED
 
         token = token_output.get("data", {}).get("raw")
         if token is None:
