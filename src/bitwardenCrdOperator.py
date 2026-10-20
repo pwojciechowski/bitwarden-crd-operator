@@ -170,9 +170,13 @@ def _bw_status(logger):
     return _extract_bw_status(command_wrapper(logger, "status", False))
 
 
-def recover_auth_state(logger):
+def recover_auth_state(logger, reset_cli_data=False):
+    """Logs out. bw logout keeps data.json and with it the device ID; only
+    reset_cli_data deletes it, so the next login is a new device (and an email)."""
     os.environ.pop("BW_SESSION", None)
     command_wrapper(logger, "logout", use_success=False)
+    if not reset_cli_data:
+        return
 
     home_dir = os.path.expanduser("~")
     cli_data_file = os.path.join(home_dir, ".config", "Bitwarden CLI", "data.json")
@@ -208,18 +212,22 @@ def bitwarden_signin(logger, **kwargs):
     logger.warn(
         "Authentication failure threshold reached, recovering Bitwarden auth state"
     )
-    recover_auth_state(logger)
-    # recover_auth_state removed data.json, which holds the server URL. Without
-    # this the recovery login goes to vault.bitwarden.com (Lerentis#133).
-    _configure_bw_host(logger)
+    # Log out keeping data.json first; delete it (a new device) only when that
+    # recovery fails too, e.g. because the file is corrupt (#108).
+    for reset_cli_data in (False, True):
+        recover_auth_state(logger, reset_cli_data=reset_cli_data)
+        # A reset data.json loses the server URL. Without this the recovery
+        # login goes to vault.bitwarden.com (Lerentis#133).
+        _configure_bw_host(logger)
 
-    recovery_ok, recovery_error = _login_and_unlock(logger, skip_cooldown=True)
-    if recovery_ok:
-        auth_failures = 0
-        logger.info("Authentication recovery succeeded")
-        return
+        recovery_ok, recovery_error = _login_and_unlock(logger, skip_cooldown=True)
+        if recovery_ok:
+            auth_failures = 0
+            logger.info("Authentication recovery succeeded")
+            return
 
-    logger.error(f"Authentication recovery failed: {recovery_error}")
+        logger.error(f"Authentication recovery failed: {recovery_error}")
+
     logger.error("Stopping operator process after failed authentication recovery")
     # Runs in the schedule thread, where sys.exit only ends that thread and
     # leaves the operator up but logged out (Lerentis#134).
