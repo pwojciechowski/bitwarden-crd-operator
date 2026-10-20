@@ -20,6 +20,9 @@ bw_auth_lock = threading.Lock()
 # ("Malformed JSON in file"), which logs the CLI out. Run them one by one.
 bw_command_lock = threading.Lock()
 _last_auth_failure_at = 0.0
+# Starts at import, so a new pod gets the full grace period before its
+# first sync. The liveness probe reads it (bitwardenCrdOperator.py).
+_last_sync_success_at = time.monotonic()
 
 
 class BitwardenCommandException(Exception):
@@ -54,7 +57,8 @@ def sync_bw(logger, force=False):
         status = command_wrapper(logger, command="sync")
         if status is None:
             logger.info(f"Sync failed, retrying in {bw_sync_interval} seconds")
-        return
+            return
+        record_sync_success()
 
     if force:
         _sync(logger)
@@ -70,6 +74,15 @@ def sync_bw(logger, force=False):
             logger.info("Running with global force sync")
     else:
         _sync(logger)
+
+
+def record_sync_success():
+    global _last_sync_success_at
+    _last_sync_success_at = time.monotonic()
+
+
+def seconds_since_last_sync():
+    return time.monotonic() - _last_sync_success_at
 
 
 def get_attachment(logger, id, name):

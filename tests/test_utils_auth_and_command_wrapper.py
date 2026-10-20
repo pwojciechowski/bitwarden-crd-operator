@@ -26,7 +26,8 @@ def _fake_startup(*args, **kwargs):
 
 if "kopf" not in sys.modules:
     kopf_module = types.ModuleType("kopf")
-    kopf_module.on = types.SimpleNamespace(startup=_fake_startup)
+    kopf_module.on = types.SimpleNamespace(startup=_fake_startup, probe=_fake_startup)
+    kopf_module.PermanentError = type("PermanentError", (Exception,), {})
     kopf_module.append_owner_reference = lambda *args, **kwargs: None
     sys.modules["kopf"] = kopf_module
 
@@ -77,6 +78,7 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         utils.record_auth_success()
 
     def tearDown(self):
+        utils.record_sync_success()
         os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
         os.environ.pop("BW_SESSION", None)
         utils.record_auth_success()
@@ -489,6 +491,27 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
             utils.unlock_bw(self.logger)
 
         self.assertIn("login --apikey", self._commands(command_wrapper_mock))
+
+
+    @patch("utils.utils.command_wrapper")
+    def test_a_successful_sync_resets_the_sync_age(self, command_wrapper_mock):
+        # The liveness probe reads this age (#108 plan B3).
+        command_wrapper_mock.return_value = {"success": True}
+        with patch("utils.utils.time.monotonic", return_value=1000.0):
+            utils.sync_bw(self.logger)
+        with patch("utils.utils.time.monotonic", return_value=1030.0):
+            self.assertEqual(utils.seconds_since_last_sync(), 30.0)
+
+    @patch("utils.utils.command_wrapper")
+    def test_a_failed_sync_does_not_reset_the_sync_age(self, command_wrapper_mock):
+        command_wrapper_mock.return_value = {"success": True}
+        with patch("utils.utils.time.monotonic", return_value=1000.0):
+            utils.sync_bw(self.logger)
+        command_wrapper_mock.return_value = None
+        with patch("utils.utils.time.monotonic", return_value=2000.0):
+            utils.sync_bw(self.logger)
+        with patch("utils.utils.time.monotonic", return_value=2500.0):
+            self.assertEqual(utils.seconds_since_last_sync(), 1500.0)
 
 
 if __name__ == "__main__":

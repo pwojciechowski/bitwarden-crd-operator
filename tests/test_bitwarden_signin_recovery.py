@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import os
 import sys
 import tempfile
@@ -21,7 +23,8 @@ def _fake_startup(*args, **kwargs):
 
 if "kopf" not in sys.modules:
     kopf_module = types.ModuleType("kopf")
-    kopf_module.on = types.SimpleNamespace(startup=_fake_startup)
+    kopf_module.on = types.SimpleNamespace(startup=_fake_startup, probe=_fake_startup)
+    kopf_module.PermanentError = type("PermanentError", (Exception,), {})
     kopf_module.append_owner_reference = lambda *args, **kwargs: None
     sys.modules["kopf"] = kopf_module
 
@@ -70,6 +73,7 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
         self.logger = DummyLogger()
         self.original_auth_failures = operator.auth_failures
         operator.auth_failures = 0
+        operator._warned_settings.clear()
         os.environ.pop("BW_HOST", None)
         os.environ.pop("BW_SESSION", None)
         os.environ.pop("BW_AUTH_FAILURE_THRESHOLD", None)
@@ -402,6 +406,76 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
             "logout",
             use_success=False,
         )
+
+
+    def _probe_at(self, sync_age):
+        with patch("bitwardenCrdOperator.seconds_since_last_sync", return_value=sync_age):
+            return asyncio.run(operator.bw_sync_health(logger=self.logger))
+
+    def test_probe_runs_on_the_event_loop_not_in_the_handler_thread_pool(self):
+        # kopf runs a sync handler in its executor, which the CR timers fill
+        # during every pass: /healthz then missed the kubelet's 1 s timeout.
+        self.assertTrue(inspect.iscoroutinefunction(operator.bw_sync_health))
+
+    def test_probe_turns_an_unexpected_error_into_a_failed_probe(self):
+        # kopf retries any other exception every 60 s while /healthz waits.
+        with patch(
+            "bitwardenCrdOperator.seconds_since_last_sync",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(operator.kopf.PermanentError):
+                asyncio.run(operator.bw_sync_health(logger=self.logger))
+
+    def test_probe_ignores_an_unusable_sync_interval(self):
+        self.addCleanup(os.environ.pop, "BW_SYNC_INTERVAL", None)
+        for invalid in ("inf", "nan", "0", "-1", "abc"):
+            with self.subTest(invalid=invalid):
+                os.environ["BW_SYNC_INTERVAL"] = invalid
+                self.assertEqual(self._probe_at(2700), 2700)
+                with self.assertRaises(operator.kopf.PermanentError):
+                    self._probe_at(2701)
+
+    def test_probe_warns_about_an_invalid_limit_only_once(self):
+        os.environ["BW_SYNC_STALE_SECONDS"] = "abc"
+        self.addCleanup(os.environ.pop, "BW_SYNC_STALE_SECONDS", None)
+
+        for _ in range(3):
+            self._probe_at(1)
+
+        warnings = [m for level, m in self.logger.messages if "BW_SYNC_STALE_SECONDS" in m]
+        self.assertEqual(len(warnings), 1)
+
+    def test_probe_reports_the_sync_age_while_syncs_succeed(self):
+        os.environ["BW_SYNC_INTERVAL"] = "1800"
+        self.addCleanup(os.environ.pop, "BW_SYNC_INTERVAL", None)
+
+        self.assertEqual(self._probe_at(1799.6), 1800)
+
+    def test_probe_fails_after_three_intervals_without_a_successful_sync(self):
+        # A Ready pod that never syncs (#108: five days of /healthz only)
+        # must fail liveness so the kubelet restarts it.
+        os.environ["BW_SYNC_INTERVAL"] = "1800"
+        self.addCleanup(os.environ.pop, "BW_SYNC_INTERVAL", None)
+
+        self.assertEqual(self._probe_at(5400), 5400)
+        with self.assertRaises(operator.kopf.PermanentError):
+            self._probe_at(5401)
+
+    def test_probe_limit_can_be_set_and_falls_back_on_invalid_values(self):
+        os.environ["BW_SYNC_INTERVAL"] = "100"
+        self.addCleanup(os.environ.pop, "BW_SYNC_INTERVAL", None)
+        self.addCleanup(os.environ.pop, "BW_SYNC_STALE_SECONDS", None)
+
+        os.environ["BW_SYNC_STALE_SECONDS"] = "1000"
+        self.assertEqual(self._probe_at(999), 999)
+        with self.assertRaises(operator.kopf.PermanentError):
+            self._probe_at(1001)
+
+        for invalid in ("abc", "0", "-5", "inf", "nan"):
+            with self.subTest(invalid=invalid):
+                os.environ["BW_SYNC_STALE_SECONDS"] = invalid
+                with self.assertRaises(operator.kopf.PermanentError):
+                    self._probe_at(301)
 
 
 if __name__ == "__main__":
