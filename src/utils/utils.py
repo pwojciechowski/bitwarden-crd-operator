@@ -138,28 +138,35 @@ def seconds_since_last_sync():
     return time.monotonic() - _last_sync_success_at
 
 
-def get_attachment(logger, id, name):
+def get_attachment(logger, id, name, item=None):
     """Returns the attachment's content, or None if bw fails to fetch it.
     bw get attachment <name> also matches file names that merely contain
     <name>, so the operator picks the attachment with exactly this file name
-    from the item and fetches it by its id (#237). A refusal is a kopf
-    TemporaryError at the sync interval: only a CR or vault change fixes it."""
+    from the item (read here unless the caller has it) and fetches it by its
+    id (#237). A refusal is a kopf TemporaryError at the sync interval: only
+    a CR or vault change fixes it."""
     id, name = str(id), str(name)
-    item = get_secret_from_bitwarden(logger, id)
-    matches = [
-        a for a in (item.get("data") or {}).get("attachments") or []
-        if a.get("fileName") == name
-    ]
+    if item is None:
+        item = get_secret_from_bitwarden(logger, id)
+    attachments = (item.get("data") or {}).get("attachments") or []
+    matches = [a for a in attachments if a.get("fileName") == name]
     if len(matches) != 1:
         raise kopf.TemporaryError(
             f"Bitwarden item {id} has {len(matches)} attachments named {name!r}, "
             f"expected 1; retrying in {bw_sync_interval:g}s",
             delay=bw_sync_interval,
         )
-    attachment_id = str(matches[0].get("id"))
-    if _rejects_option_like(logger, attachment_id=attachment_id):
+    attachment_id = str(matches[0].get("id") or "")
+    # bw matches <id> against ids and against file names containing it (any
+    # case), preferring an exact name: another attachment named after this
+    # id would be fetched instead.
+    shadowed = any(
+        a is not matches[0] and attachment_id.lower() in str(a.get("fileName") or "").lower()
+        for a in attachments
+    )
+    if not attachment_id or shadowed or _rejects_option_like(logger, attachment_id=attachment_id):
         raise kopf.TemporaryError(
-            f"Refusing attachment id {attachment_id!r} of item {id}",
+            f"Refusing attachment id {attachment_id!r} of item {id} for {name!r}",
             delay=bw_sync_interval,
         )
     return command_wrapper(

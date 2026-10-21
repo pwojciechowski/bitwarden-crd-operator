@@ -53,7 +53,7 @@ def create_kv(logger, id, secret, secret_json, content_def):
                     base64.b64encode(value.encode("utf-8")), "utf-8"
                 )
             if _secret_scope == "attachment":
-                value = get_attachment(logger, id, _secret_key)
+                value = get_attachment(logger, id, _secret_key, item=secret_json)
                 if value is None:
                     raise Exception(
                         f"Attachment {_secret_key} has no value in bitwarden secret"

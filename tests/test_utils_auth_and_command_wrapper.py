@@ -362,6 +362,38 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
                 self.assertEqual(self._bw_argvs(popen_mock), [["get", "item", ITEM_ID]])
 
     @patch("utils.utils.subprocess.Popen")
+    def test_an_attachment_id_another_file_name_contains_is_refused(self, popen_mock):
+        # bw get attachment <id> also matches file names containing <id> (any
+        # case) and prefers an exact one: B named after A's id would win.
+        cases = {
+            "exact": [{"id": "abc123", "fileName": "server.pem"}, {"id": "zz", "fileName": "ABC123"}],
+            "contains": [{"id": "abc123", "fileName": "server.pem"}, {"id": "zz", "fileName": "x-abc123.txt"}],
+            "no id": [{"fileName": "server.pem"}],
+            "empty id": [{"id": "", "fileName": "server.pem"}],
+        }
+        for case, attachments in cases.items():
+            with self.subTest(case=case):
+                popen_mock.reset_mock()
+                self._item_with_attachments(popen_mock, attachments)
+                with self.assertRaises(utils.kopf.TemporaryError) as raised:
+                    utils.get_attachment(self.logger, ITEM_ID, "server.pem")
+                self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
+                self.assertEqual(self._bw_argvs(popen_mock), [["get", "item", ITEM_ID]])
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_an_item_already_read_is_not_read_again(self, popen_mock):
+        raw = MagicMock()
+        raw.returncode = 0
+        raw.communicate.return_value = (b"pem", b"")
+        popen_mock.return_value = raw
+        item = {"data": {"attachments": [{"id": "att-pem", "fileName": "server.pem"}]}}
+
+        self.assertEqual(utils.get_attachment(self.logger, ITEM_ID, "server.pem", item=item), "pem")
+        self.assertEqual(
+            self._bw_argvs(popen_mock), [["get", "attachment", "att-pem", "--itemid", ITEM_ID]]
+        )
+
+    @patch("utils.utils.subprocess.Popen")
     def test_attachment_name_never_reaches_bw(self, popen_mock):
         self._item_with_attachments(popen_mock, [{"id": "att-1", "fileName": "my file; rm -rf /"}])
 
