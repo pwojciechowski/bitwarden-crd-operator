@@ -312,7 +312,9 @@ def run_continuously(interval=30):
                 schedule.run_pending()
                 time.sleep(interval)
 
-    continuous_thread = ScheduleThread()
+    # A daemon thread: once kopf stops on SIGTERM, Python exits without
+    # waiting for this endless loop (before, the kubelet had to SIGKILL it).
+    continuous_thread = ScheduleThread(daemon=True)
     continuous_thread.start()
     return cease_continuous_run
 
