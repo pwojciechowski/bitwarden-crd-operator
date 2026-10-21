@@ -207,7 +207,50 @@ class TemplateLimitTests(unittest.TestCase):
                 self.assertIn("exponent", self._refused(source))
 
     def test_small_powers_still_render(self):
-        self.assertEqual(template.render_template(self.logger, "{{ 2 ** 10 }}"), "1024")
+        cases = {
+            "{{ 2 ** 10 }}": "1024",
+            "{{ 10 ** -2 }}": "0.01",
+            "{{ 7 ** 0 }}": "1",
+            "{{ 1 ** 100000000 }}": "1",
+            "{{ true ** 3 }}": "1",
+            "{{ 2.0 ** 3 }}": "8.0",
+        }
+        for source, rendered in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(template.render_template(self.logger, source), rendered)
+
+    def test_the_power_refusal_reports_sizes_not_values(self):
+        # A value over 4300 digits cannot even be formatted; one from a
+        # lookup must not reach logs and Events.
+        message = self._refused("{{ 123456789 ** 100000000 }}")
+
+        self.assertNotIn("123456789", message)
+
+    def test_a_chain_of_multiplications_is_refused(self):
+        # Each step is allowed, but * on big integers grows without bound:
+        # one multiplication of ~350 Mbit numbers takes minutes.
+        source = "{% set a = 10 ** 400 %}{% set b = a * a * a * a %}{{ b * b * b * b }}"
+
+        self.assertIn("too large", self._refused(source))
+
+    def test_a_huge_repetition_is_refused(self):
+        for source in ("{{ 'x' * 1000000000 }}", "{{ [1] * 1000000000 }}", "{{ 1000000000 * 'x' }}"):
+            with self.subTest(source=source):
+                self.assertIn("too large", self._refused(source))
+
+    def test_small_multiplications_still_render(self):
+        cases = {"{{ 6 * 7 }}": "42", "{{ 'ab' * 3 }}": "ababab", "{{ 1.5 * 2 }}": "3.0"}
+        for source, rendered in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(template.render_template(self.logger, source), rendered)
+
+    def test_a_loop_inside_a_macro_stops_after_the_cpu_budget(self):
+        source = (
+            "{% macro spin() %}{% for i in range(100) %}{% for j in range(100000) %}"
+            "{% endfor %}{% endfor %}{% endmacro %}{{ spin() }}"
+        )
+        with patch.object(template, "RENDER_CPU_SECONDS", 0.2):
+            self.assertIn("CPU", self._refused(source))
 
     def test_the_cpu_budget_restores_the_previous_tracer(self):
         def tracer(frame, event, arg):
@@ -225,10 +268,10 @@ class TemplateLimitTests(unittest.TestCase):
                 with self.subTest(case=case):
                     sys.settrace(tracer)
                     with patch.object(template, "RENDER_CPU_SECONDS", 0.2):
-                        try:
+                        if case == "ok":
                             template.render_template(self.logger, source)
-                        except TemporaryError:
-                            pass
+                        else:
+                            self._refused(source)
                     self.assertIs(sys.gettrace(), tracer)
         finally:
             sys.settrace(previous)

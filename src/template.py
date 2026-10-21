@@ -24,16 +24,16 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 
 # Limits for a broken or hostile CR (#108). The real templates are at most
-# 285 characters and render to at most 109 (2026-10-21). Single operations
-# that allocate a lot (a huge "x" * n, center, ~ chains) stay bounded only by
-# the pod's memory limit. The limits apply per template, so a CR with many
-# content entries gets each of them.
+# 285 characters and render to at most 109 (2026-10-21). Residual: a single
+# filter call (center, wordwrap) or a chain of ~ concatenations runs in C or
+# untraced code, bounded only by the pod's memory limit. The limits apply per
+# template, so a CR with many content entries gets each of them.
 TEMPLATE_MAX_CHARS = 16 * 1024
 RENDERED_MAX_CHARS = 256 * 1024
 # CPU time of the rendering thread: waiting for bw lookups does not count.
 RENDER_CPU_SECONDS = 5.0
-# A ** result larger than this would be one long C computation.
-POWER_MAX_RESULT_BITS = 4096
+# A larger ** or * integer result would be one long C computation.
+INT_MAX_RESULT_BITS = 4096
 
 
 class _RenderCpuBudgetExceeded(BaseException):
@@ -62,23 +62,33 @@ def _refuse(message):
     return kopf.TemporaryError(f"Refusing template: {message}", delay=bw_sync_interval)
 
 
-def _huge_power(base, exponent):
-    return (
-        isinstance(base, int)
-        and isinstance(exponent, int)
-        and exponent > 0
-        and abs(base).bit_length() * exponent > POWER_MAX_RESULT_BITS
-        and abs(base) > 1
-    )
+def _too_large(operator, left, right):
+    if operator == "**":
+        return (
+            isinstance(left, int)
+            and isinstance(right, int)
+            and right > 0
+            and abs(left) > 1
+            and abs(left).bit_length() * right > INT_MAX_RESULT_BITS
+        )
+    if isinstance(left, int) and isinstance(right, int):
+        return abs(left).bit_length() + abs(right).bit_length() > INT_MAX_RESULT_BITS
+    for sequence, count in ((left, right), (right, left)):
+        if isinstance(sequence, (str, list, tuple)) and isinstance(count, int):
+            return len(sequence) * count > RENDERED_MAX_CHARS
+    return False
 
 
 class _BoundedSandbox(ImmutableSandboxedEnvironment):
     # Jinja does not fold intercepted operators at compile time either.
-    intercepted_binops = frozenset({"**"})
+    intercepted_binops = frozenset({"**", "*"})
 
     def call_binop(self, context, operator, left, right):
-        if operator == "**" and _huge_power(left, right):
-            raise _refuse(f"exponent {right} on {left} is too large")
+        if _too_large(operator, left, right):
+            # Sizes only: a value can come from a lookup, and one over 4300
+            # digits cannot even be formatted.
+            kind = "exponent" if operator == "**" else "product"
+            raise _refuse(f"{kind} too large")
         return super().call_binop(context, operator, left, right)
 
 
