@@ -10,6 +10,7 @@ ARG GCOMPAT_VERSION=1.1.0-r4
 ARG LIBCRYPTO_VERSION=3.5.5-r0
 ARG BW_VERSION=2025.5.0
 ARG NODE_VERSION=24.18.1-r0
+ARG TINI_VERSION=0.19.0-r3
 
 COPY requirements.txt /requirements.txt
 
@@ -22,7 +23,7 @@ RUN set -eux; \
     adduser -S -D -u 1000 -G bw-operator bw-operator; \
     mkdir -p /home/bw-operator; \
     chown -R bw-operator /home/bw-operator; \
-    apk add gcc musl-dev libstdc++ gcompat=${GCOMPAT_VERSION} python3=${PYTHON_VERSION} py3-pip=${PIP_VERSION} libcrypto3=${LIBCRYPTO_VERSION}; \
+    apk add gcc musl-dev libstdc++ gcompat=${GCOMPAT_VERSION} python3=${PYTHON_VERSION} py3-pip=${PIP_VERSION} libcrypto3=${LIBCRYPTO_VERSION} tini=${TINI_VERSION}; \
     pip install -r /requirements.txt --no-warn-script-location --break-system-packages; \
     rm /requirements.txt; \
     apk del --purge gcc musl-dev libstdc++;
@@ -31,5 +32,6 @@ COPY --chown=bw-operator:bw-operator src /home/bw-operator
 
 USER bw-operator
 
-ENTRYPOINT [ "kopf", "run", "--log-format=json", "--all-namespaces", "--liveness=http://0.0.0.0:8080/healthz" ]
+# tini as PID 1 reaps orphaned bw processes and forwards SIGTERM to kopf.
+ENTRYPOINT [ "/sbin/tini", "--", "kopf", "run", "--log-format=json", "--all-namespaces", "--liveness=http://0.0.0.0:8080/healthz" ]
 CMD [ "/home/bw-operator/bitwardenCrdOperator.py", "/home/bw-operator/kv.py", "/home/bw-operator/dockerlogin.py", "/home/bw-operator/template.py"]
