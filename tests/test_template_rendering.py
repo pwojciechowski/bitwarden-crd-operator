@@ -1,5 +1,6 @@
 import importlib
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -18,10 +19,18 @@ if "kubernetes" not in sys.modules:
     )
 
 
+class TemporaryError(Exception):
+    def __init__(self, message="", delay=60):
+        super().__init__(message)
+        self.delay = delay
+
+
 def _import_template():
     # template.py decorates kopf handlers at import time; a MagicMock kopf
-    # accepts any decorator.
-    with patch.dict(sys.modules, {"kopf": MagicMock()}):
+    # accepts any decorator. Its errors must be real exceptions.
+    kopf = MagicMock()
+    kopf.TemporaryError = TemporaryError
+    with patch.dict(sys.modules, {"kopf": kopf}):
         sys.modules.pop("template", None)
         return importlib.import_module("template")
 
@@ -110,6 +119,62 @@ class TemplateRenderingTests(unittest.TestCase):
                 template.render_template(
                     self.logger, '{{ bitwarden_lookup("item-1", "bogus", "x") }}'
                 )
+
+
+class TemplateLimitTests(unittest.TestCase):
+    """A broken or hostile BitwardenTemplate must not burn the operator's CPU
+    or memory (#108). The real templates are at most 285 characters and
+    render to at most 109 (2026-10-21)."""
+
+    def setUp(self):
+        self.logger = MagicMock()
+
+    def _refused(self, source):
+        with self.assertRaises(TemporaryError) as raised:
+            template.render_template(self.logger, source)
+        # Only a CR change fixes it: retry at the sync interval, not every 60 s.
+        self.assertEqual(raised.exception.delay, template.bw_sync_interval)
+        return str(raised.exception)
+
+    def test_a_template_at_the_size_limit_renders(self):
+        source = "x" * template.TEMPLATE_MAX_CHARS
+
+        self.assertEqual(template.render_template(self.logger, source), source)
+
+    def test_an_oversized_template_is_refused_before_rendering(self):
+        source = "{{ boom() }}" + "x" * template.TEMPLATE_MAX_CHARS
+
+        self.assertIn("template is", self._refused(source))
+
+    def test_output_over_the_limit_is_refused(self):
+        source = "{% for i in range(100000) %}0123456789{% endfor %}"
+
+        self.assertIn("rendered output exceeds", self._refused(source))
+
+    def test_a_render_stops_after_its_cpu_budget(self):
+        # Produces no output, so only the CPU budget stops it.
+        source = (
+            "{% for i in range(100000) %}{% for j in range(100000) %}"
+            "{% endfor %}{% endfor %}"
+        )
+        with patch.object(template, "RENDER_CPU_SECONDS", 0.2):
+            started = time.monotonic()
+            message = self._refused(source)
+
+        self.assertIn("CPU", message)
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_the_cpu_budget_restores_the_previous_tracer(self):
+        def tracer(frame, event, arg):
+            return None
+
+        previous = sys.gettrace()
+        sys.settrace(tracer)
+        try:
+            template.render_template(self.logger, "ok")
+            self.assertIs(sys.gettrace(), tracer)
+        finally:
+            sys.settrace(previous)
 
 
 if __name__ == "__main__":

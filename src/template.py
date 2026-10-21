@@ -1,6 +1,8 @@
 import kopf
 import base64
 import kubernetes
+import sys
+import time
 
 from utils.utils import (
     BitwardenCommandException,
@@ -21,7 +23,38 @@ from jinja2 import BaseLoader
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 
+# Limits for a broken or hostile CR (#108). The real templates are at most
+# 285 characters and render to at most 109 (2026-10-21). Single operations
+# that allocate a lot (a huge "x" * n, center, ~ chains) stay bounded only by
+# the pod's memory limit.
+TEMPLATE_MAX_CHARS = 16 * 1024
+RENDERED_MAX_CHARS = 256 * 1024
+# CPU time of the rendering thread: waiting for bw lookups does not count.
+RENDER_CPU_SECONDS = 5.0
+
+
+class _RenderCpuBudgetExceeded(BaseException):
+    """A BaseException, so no except Exception on the way swallows it."""
+
+
+def _cpu_budget_tracer(deadline):
+    def tracer(frame, event, arg):
+        if time.thread_time() > deadline:
+            raise _RenderCpuBudgetExceeded()
+        return tracer
+
+    return tracer
+
+
+def _refuse(message):
+    # Only a CR change fixes it: retry at the sync interval, not every 60 s.
+    return kopf.TemporaryError(f"Refusing template: {message}", delay=bw_sync_interval)
+
+
 def render_template(logger, template):
+    if len(template) > TEMPLATE_MAX_CHARS:
+        raise _refuse(f"template is {len(template)} characters (limit {TEMPLATE_MAX_CHARS})")
+
     # Templates come from CRs; sandboxed so they cannot reach Python internals
     # (and through them the operator's environment and credentials).
     jinja_template = ImmutableSandboxedEnvironment(loader=BaseLoader()).from_string(
@@ -32,7 +65,22 @@ def render_template(logger, template):
             "bitwarden_lookup": BitwardenLookupHandler(logger).bitwarden_lookup,
         }
     )
-    return jinja_template.render()
+
+    chunks, size = [], 0
+    previous_tracer = sys.gettrace()
+    sys.settrace(_cpu_budget_tracer(time.thread_time() + RENDER_CPU_SECONDS))
+    try:
+        # Streamed, so a loop that writes output stops at the limit.
+        for chunk in jinja_template.generate():
+            size += len(chunk)
+            if size > RENDERED_MAX_CHARS:
+                raise _refuse(f"rendered output exceeds {RENDERED_MAX_CHARS} characters")
+            chunks.append(chunk)
+    except _RenderCpuBudgetExceeded:
+        raise _refuse(f"rendering used more than {RENDER_CPU_SECONDS:g}s of CPU") from None
+    finally:
+        sys.settrace(previous_tracer)
+    return "".join(chunks)
 
 
 def create_template_secret(logger, secret, filename, template):
