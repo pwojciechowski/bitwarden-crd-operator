@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import re
 import shlex
 import signal
 import subprocess
@@ -56,6 +57,21 @@ def _rejects_option_like(logger, **values):
     return False
 
 
+# bw's own GUID test (Utils.guidRegex, CLI 2025.5.0), lowercase only. Any
+# other id makes bw get item search item names, so a renamed or duplicate
+# item could sync the wrong secret (#108).
+ITEM_ID_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
+
+
+def _rejects_non_uuid(logger, id):
+    if ITEM_ID_PATTERN.fullmatch(id):
+        return False
+    logger.warn(f"Refusing Bitwarden item id {id!r}: not a UUID")
+    return True
+
+
 def get_secret_from_bitwarden(logger, id):
     """Returns the item, or raises kopf.TemporaryError, which kopf logs as one
     line and retries after its delay. A missing item (deleted, or not shared
@@ -67,9 +83,10 @@ def get_secret_from_bitwarden(logger, id):
     change handlers sync before their lookups (#108 B2). BW_FORCE_SYNC=true
     syncs before every lookup, as before."""
     id = str(id)
-    if _rejects_option_like(logger, id=id):
+    if _rejects_non_uuid(logger, id):
         raise kopf.TemporaryError(
-            f"Refusing Bitwarden item id {id!r}; fix spec.id", delay=bw_sync_interval
+            f"Refusing Bitwarden item id {id!r}: not a UUID; fix the CR",
+            delay=bw_sync_interval,
         )
     if _str_to_bool(os.environ.get("BW_FORCE_SYNC", "false")):
         if "DEBUG" in dict(os.environ):
@@ -123,7 +140,7 @@ def seconds_since_last_sync():
 
 def get_attachment(logger, id, name):
     id, name = str(id), str(name)
-    if _rejects_option_like(logger, id=id, name=name):
+    if _rejects_non_uuid(logger, id) or _rejects_option_like(logger, name=name):
         return None
     return command_wrapper(
         logger, command=["get", "attachment", name, "--itemid", id], raw=True

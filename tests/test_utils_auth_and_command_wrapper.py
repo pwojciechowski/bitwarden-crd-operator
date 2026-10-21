@@ -9,6 +9,7 @@ import threading
 import time
 import types
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -283,15 +284,30 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         self.assertFalse(popen_mock.call_args.kwargs.get("shell", False))
 
     @patch("utils.utils.subprocess.Popen")
-    def test_item_id_from_a_cr_cannot_inject_shell_commands(self, popen_mock):
+    def test_item_ids_other_than_a_uuid_never_reach_bw(self, popen_mock):
+        # bw get item searches item names unless the id passes bw's own GUID
+        # test, so a renamed or duplicate item could sync the wrong secret.
         self._ok_process(popen_mock)
-        hostile = "abc; touch /tmp/pwned $(id)"
+        not_uuids = [
+            "Grafana admin",
+            "abc; touch /tmp/pwned $(id)",
+            ITEM_ID.upper(),
+            "{" + ITEM_ID + "}",
+            ITEM_ID + "\n",
+            ITEM_ID.replace("-", ""),
+            ITEM_ID[:14] + "0" + ITEM_ID[15:],  # version 0: bw searches names
+            123,
+        ]
+        for item_id in not_uuids:
+            with self.subTest(item_id=item_id):
+                with self.assertRaises(utils.kopf.TemporaryError) as raised:
+                    utils.get_secret_from_bitwarden(self.logger, item_id)
+                # Temporary, so a create handler still picks up a fixed spec.id.
+                self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
+                self.assertIn("not a UUID", str(raised.exception))
+                self.assertIsNone(utils.get_attachment(self.logger, item_id, "f"))
 
-        utils.get_secret_from_bitwarden(self.logger, hostile)
-
-        argv = popen_mock.call_args_list[-1].args[0]
-        self.assertEqual(argv, ["bw", "--response", "get", "item", hostile])
-        self.assertFalse(popen_mock.call_args.kwargs.get("shell", False))
+        popen_mock.assert_not_called()
 
     @patch("utils.utils.subprocess.Popen")
     def test_attachment_name_and_item_id_are_single_arguments(self, popen_mock):
@@ -308,11 +324,11 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
     def test_non_string_cr_values_become_string_arguments(self, popen_mock):
         self._ok_process(popen_mock)
 
-        utils.get_secret_from_bitwarden(self.logger, 123)
-        self.assertEqual(popen_mock.call_args.args[0][-1], "123")
+        utils.get_secret_from_bitwarden(self.logger, uuid.UUID(ITEM_ID))
+        self.assertEqual(popen_mock.call_args.args[0][-1], ITEM_ID)
 
-        utils.get_attachment(self.logger, 456, 789)
-        self.assertEqual(popen_mock.call_args.args[0][-4:], ["attachment", "789", "--itemid", "456"])
+        utils.get_attachment(self.logger, uuid.UUID(ITEM_ID), 789)
+        self.assertEqual(popen_mock.call_args.args[0][-4:], ["attachment", "789", "--itemid", ITEM_ID])
 
     @patch("utils.utils.subprocess.Popen")
     def test_cr_values_that_look_like_options_are_rejected(self, popen_mock):
