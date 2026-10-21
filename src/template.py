@@ -157,11 +157,6 @@ def update_beta7_secret(spec, status, name, namespace, logger, body, **kwargs):
 
 
 @kopf.on.update("bitwarden-template.lerentis.uploadfilter24.eu")
-@kopf.timer(
-    "bitwarden-template.lerentis.uploadfilter24.eu",
-    interval=bw_sync_interval,
-    initial_delay=10,
-)
 def update_managed_secret(spec, status, name, namespace, logger, body, **kwargs):
     template = spec.get("template")
     if template is not None:
@@ -210,6 +205,15 @@ def update_managed_secret(spec, status, name, namespace, logger, body, **kwargs)
 
     apply_owner_reference(secret, config["secret_namespace"], namespace)
     update_secret(logger, secret, config["secret_namespace"])
+
+
+@kopf.timer(
+    "bitwarden-template.lerentis.uploadfilter24.eu",
+    interval=bw_sync_interval,
+    initial_delay=10,
+)
+def refresh_managed_secret(**kwargs):
+    update_managed_secret(**kwargs)
 
 
 @kopf.on.delete("bitwarden-template.lerentis.uploadfilter24.eu")

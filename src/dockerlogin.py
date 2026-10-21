@@ -76,11 +76,6 @@ def create_managed_registry_secret(spec, name, namespace, logger, **kwargs):
 
 
 @kopf.on.update("registry-credential.lerentis.uploadfilter24.eu")
-@kopf.timer(
-    "registry-credential.lerentis.uploadfilter24.eu",
-    interval=bw_sync_interval,
-    initial_delay=10,
-)
 def update_managed_registry_secret(
     spec, status, name, namespace, logger, body, **kwargs
 ):
@@ -132,6 +127,15 @@ def update_managed_registry_secret(
 
     apply_owner_reference(secret, config["secret_namespace"], namespace)
     update_secret(logger, secret, config["secret_namespace"])
+
+
+@kopf.timer(
+    "registry-credential.lerentis.uploadfilter24.eu",
+    interval=bw_sync_interval,
+    initial_delay=10,
+)
+def refresh_managed_registry_secret(**kwargs):
+    update_managed_registry_secret(**kwargs)
 
 
 @kopf.on.delete("registry-credential.lerentis.uploadfilter24.eu")
