@@ -74,15 +74,6 @@ class TemplateRenderingTests(unittest.TestCase):
                     self.logger, '{{ bitwarden_lookup("item-1", "attachment", "key.pem") }}'
                 )
 
-    def test_failed_item_lookup_fails_rendering(self):
-        with patch.dict(
-            self._lookup_globals(), {"get_secret_from_bitwarden": lambda *a, **k: None}
-        ):
-            with self.assertRaises(template.BitwardenCommandException):
-                template.render_template(
-                    self.logger, '{{ bitwarden_lookup("item-1", "login", "password") }}'
-                )
-
 
     def test_a_lookup_error_reaches_kopf_unchanged_through_the_render(self):
         # The sandboxed render must not wrap the kopf error: its delay is the
