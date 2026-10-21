@@ -139,11 +139,31 @@ def seconds_since_last_sync():
 
 
 def get_attachment(logger, id, name):
+    """Returns the attachment's content, or None if bw fails to fetch it.
+    bw get attachment <name> also matches file names that merely contain
+    <name>, so the operator picks the attachment with exactly this file name
+    from the item and fetches it by its id (#237). A refusal is a kopf
+    TemporaryError at the sync interval: only a CR or vault change fixes it."""
     id, name = str(id), str(name)
-    if _rejects_non_uuid(logger, id) or _rejects_option_like(logger, name=name):
-        return None
+    item = get_secret_from_bitwarden(logger, id)
+    matches = [
+        a for a in (item.get("data") or {}).get("attachments") or []
+        if a.get("fileName") == name
+    ]
+    if len(matches) != 1:
+        raise kopf.TemporaryError(
+            f"Bitwarden item {id} has {len(matches)} attachments named {name!r}, "
+            f"expected 1; retrying in {bw_sync_interval:g}s",
+            delay=bw_sync_interval,
+        )
+    attachment_id = str(matches[0].get("id"))
+    if _rejects_option_like(logger, attachment_id=attachment_id):
+        raise kopf.TemporaryError(
+            f"Refusing attachment id {attachment_id!r} of item {id}",
+            delay=bw_sync_interval,
+        )
     return command_wrapper(
-        logger, command=["get", "attachment", name, "--itemid", id], raw=True
+        logger, command=["get", "attachment", attachment_id, "--itemid", id], raw=True
     )
 
 

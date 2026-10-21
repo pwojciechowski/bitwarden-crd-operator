@@ -307,19 +307,69 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
                 # Temporary, so a create handler still picks up a fixed spec.id.
                 self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
                 self.assertIn("not a lowercase UUID", str(raised.exception))
-                self.assertIsNone(utils.get_attachment(self.logger, item_id, "f"))
+                with self.assertRaises(utils.kopf.TemporaryError) as raised:
+                    utils.get_attachment(self.logger, item_id, "f")
+                # Refused like an item lookup, not retried every 60 s (#237).
+                self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
 
         popen_mock.assert_not_called()
 
+    def _item_with_attachments(self, popen_mock, attachments, content=b"pem"):
+        """bw get item with these attachments, then the raw attachment."""
+        item = MagicMock()
+        item.returncode = 0
+        item.communicate.return_value = (
+            json.dumps({"success": True, "data": {"id": ITEM_ID, "attachments": attachments}}).encode(),
+            b"",
+        )
+        raw = MagicMock()
+        raw.returncode = 0
+        raw.communicate.return_value = (content, b"")
+        popen_mock.side_effect = [item, raw]
+
     @patch("utils.utils.subprocess.Popen")
-    def test_attachment_name_and_item_id_are_single_arguments(self, popen_mock):
-        self._ok_process(popen_mock)
+    def test_attachment_is_fetched_by_the_id_of_the_exact_file_name(self, popen_mock):
+        # bw get attachment <name> also matches file names that only contain
+        # <name>; the operator picks the attachment itself (#237).
+        self._item_with_attachments(popen_mock, [
+            {"id": "att-key", "fileName": "server.key"},
+            {"id": "att-pem", "fileName": "server.pem"},
+        ])
+
+        self.assertEqual(utils.get_attachment(self.logger, ITEM_ID, "server.pem"), "pem")
+        self.assertEqual(
+            self._bw_argvs(popen_mock),
+            [["get", "item", ITEM_ID], ["get", "attachment", "att-pem", "--itemid", ITEM_ID]],
+        )
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_a_partial_or_ambiguous_attachment_name_is_refused(self, popen_mock):
+        cases = {
+            "key": [{"id": "a1", "fileName": "server.key"}],
+            "Server.Key": [{"id": "a1", "fileName": "server.key"}],
+            "server.key": [
+                {"id": "a1", "fileName": "server.key"},
+                {"id": "a2", "fileName": "server.key"},
+            ],
+        }
+        for name, attachments in cases.items():
+            with self.subTest(name=name, count=len(attachments)):
+                popen_mock.reset_mock()
+                self._item_with_attachments(popen_mock, attachments)
+                with self.assertRaises(utils.kopf.TemporaryError) as raised:
+                    utils.get_attachment(self.logger, ITEM_ID, name)
+                self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
+                self.assertEqual(self._bw_argvs(popen_mock), [["get", "item", ITEM_ID]])
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_attachment_name_never_reaches_bw(self, popen_mock):
+        self._item_with_attachments(popen_mock, [{"id": "att-1", "fileName": "my file; rm -rf /"}])
 
         utils.get_attachment(self.logger, ITEM_ID, "my file; rm -rf /")
 
         self.assertEqual(
             popen_mock.call_args.args[0],
-            ["bw", "--raw", "get", "attachment", "my file; rm -rf /", "--itemid", ITEM_ID],
+            ["bw", "--raw", "get", "attachment", "att-1", "--itemid", ITEM_ID],
         )
 
     @patch("utils.utils.subprocess.Popen")
@@ -329,8 +379,9 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         utils.get_secret_from_bitwarden(self.logger, uuid.UUID(ITEM_ID))
         self.assertEqual(popen_mock.call_args.args[0][-1], ITEM_ID)
 
+        self._item_with_attachments(popen_mock, [{"id": "att-789", "fileName": "789"}])
         utils.get_attachment(self.logger, uuid.UUID(ITEM_ID), 789)
-        self.assertEqual(popen_mock.call_args.args[0][-4:], ["attachment", "789", "--itemid", ITEM_ID])
+        self.assertEqual(popen_mock.call_args.args[0][-4:], ["attachment", "att-789", "--itemid", ITEM_ID])
 
     @patch("utils.utils.subprocess.Popen")
     def test_cr_values_that_look_like_options_are_rejected(self, popen_mock):
@@ -340,11 +391,16 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
             utils.get_secret_from_bitwarden(self.logger, "--session=x")
         # Temporary, so a create handler still picks up a corrected spec.id.
         self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
-        self.assertIsNone(utils.get_attachment(self.logger, ITEM_ID, "-x"))
-        self.assertIsNone(utils.get_attachment(self.logger, "--help", "file"))
-
+        with self.assertRaises(utils.kopf.TemporaryError):
+            utils.get_attachment(self.logger, "--help", "file")
         commands = [call.args[0] for call in popen_mock.call_args_list]
         self.assertFalse(any(argv[2] == "get" for argv in commands), commands)
+
+        # An attachment id from bw that looks like an option is refused too.
+        self._item_with_attachments(popen_mock, [{"id": "-x", "fileName": "f"}])
+        with self.assertRaises(utils.kopf.TemporaryError):
+            utils.get_attachment(self.logger, ITEM_ID, "f")
+        self.assertEqual(self._bw_argvs(popen_mock), [["get", "item", ITEM_ID]])
 
     def _bw_results(self, popen_mock, *responses):
         """One fake bw process per call: (returncode, response dict)."""
