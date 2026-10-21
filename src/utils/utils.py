@@ -29,6 +29,15 @@ class BitwardenCommandException(Exception):
     pass
 
 
+class BitwardenItemNotFound(BitwardenCommandException):
+    pass
+
+
+# Retry delay for a failed item lookup that is not a missing item (a timeout,
+# a logged-out CLI): the same as kopf's default backoff.
+LOOKUP_RETRY_SECONDS = 60
+
+
 def _str_to_bool(value):
     normalized_value = str(value).strip().lower()
     return normalized_value in ("1", "true", "t", "yes", "y", "on")
@@ -45,11 +54,28 @@ def _rejects_option_like(logger, **values):
 
 
 def get_secret_from_bitwarden(logger, id, force_sync=False):
+    """Returns the item, or raises a kopf error: kopf logs a TemporaryError as
+    one line and retries after its delay. A missing item (deleted, or not
+    shared with the operator) waits a sync interval; it used to crash the
+    handlers on None and retry every 60 s (Geekvetica#108 B5)."""
     id = str(id)
     if _rejects_option_like(logger, id=id):
-        return None
+        raise kopf.PermanentError(f"Refusing Bitwarden item id {id!r}")
     sync_bw(logger, force=force_sync)
-    return command_wrapper(logger, command=["get", "item", id])
+    try:
+        item = command_wrapper(logger, command=["get", "item", id], raise_not_found=True)
+    except BitwardenItemNotFound:
+        raise kopf.TemporaryError(
+            f"Bitwarden item {id} not found (deleted, or not shared with the "
+            f"operator); retrying in {bw_sync_interval:g}s",
+            delay=bw_sync_interval,
+        ) from None
+    if item is None:
+        raise kopf.TemporaryError(
+            f"Lookup of Bitwarden item {id} failed; retrying in {LOOKUP_RETRY_SECONDS}s",
+            delay=LOOKUP_RETRY_SECONDS,
+        )
+    return item
 
 
 def sync_bw(logger, force=False):
@@ -295,10 +321,13 @@ def _kill_and_reap(logger, sp):
         return b"", b""
 
 
-def command_wrapper(logger, command, use_success: bool = True, raw: bool = False):
+def command_wrapper(
+    logger, command, use_success: bool = True, raw: bool = False, raise_not_found: bool = False
+):
     """Run one bw command. `command` is a fixed string such as "sync", or a
     list when it carries values from a CR, which then stay single arguments.
-    No shell is involved."""
+    No shell is involved. With raise_not_found, a "Not found." response
+    raises BitwardenItemNotFound instead of logging and returning None."""
     response_flag = "--raw" if raw else "--response"
     args = shlex.split(command) if isinstance(command, str) else list(command)
     argv = ["bw", response_flag, *args]
@@ -346,6 +375,8 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
     )
 
     if sp.returncode != 0:
+        if raise_not_found and _is_not_found_response(stdout):
+            raise BitwardenItemNotFound(command_line)
         logger.warn(
             f"bw command failed (returncode={sp.returncode}): {command_line}"
         )
@@ -380,6 +411,14 @@ def command_wrapper(logger, command, use_success: bool = True, raw: bool = False
 
     logger.warn(resp)
     return None
+
+
+def _is_not_found_response(stdout):
+    try:
+        resp = json.loads(stdout)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(resp, dict) and resp.get("message") == "Not found."
 
 
 def _command_timeout_seconds(logger):

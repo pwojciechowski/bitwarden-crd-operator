@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import signal
@@ -28,6 +29,13 @@ if "kopf" not in sys.modules:
     kopf_module = types.ModuleType("kopf")
     kopf_module.on = types.SimpleNamespace(startup=_fake_startup, probe=_fake_startup)
     kopf_module.PermanentError = type("PermanentError", (Exception,), {})
+
+    class _TemporaryError(Exception):
+        def __init__(self, message="", delay=60):
+            super().__init__(message)
+            self.delay = delay
+
+    kopf_module.TemporaryError = _TemporaryError
     kopf_module.append_owner_reference = lambda *args, **kwargs: None
     sys.modules["kopf"] = kopf_module
 
@@ -303,12 +311,47 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
     def test_cr_values_that_look_like_options_are_rejected(self, popen_mock):
         self._ok_process(popen_mock)
 
-        self.assertIsNone(utils.get_secret_from_bitwarden(self.logger, "--session=x"))
+        with self.assertRaises(utils.kopf.PermanentError):
+            utils.get_secret_from_bitwarden(self.logger, "--session=x")
         self.assertIsNone(utils.get_attachment(self.logger, "item-1", "-x"))
         self.assertIsNone(utils.get_attachment(self.logger, "--help", "file"))
 
         commands = [call.args[0] for call in popen_mock.call_args_list]
         self.assertFalse(any(argv[2] == "get" for argv in commands), commands)
+
+    def _failed_process(self, popen_mock, message):
+        process = MagicMock()
+        process.returncode = 1
+        process.communicate.return_value = (
+            json.dumps({"success": False, "message": message}).encode(), b""
+        )
+        popen_mock.return_value = process
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_missing_item_is_one_clear_error_retried_at_the_sync_interval(self, popen_mock):
+        # Geekvetica#108 B5: a missing or unshared item crashed the handler
+        # with 'NoneType' object is not subscriptable and retried every 60 s.
+        self._failed_process(popen_mock, "Not found.")
+
+        with self.assertRaises(utils.kopf.TemporaryError) as raised:
+            utils.get_secret_from_bitwarden(self.logger, "item-1")
+
+        self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
+        self.assertIn("item-1", str(raised.exception))
+        self.assertIn("not found", str(raised.exception))
+        self.assertFalse(
+            [m for m in self.logger.messages if "get item" in m[1]], self.logger.messages
+        )
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_other_item_lookup_failures_retry_soon(self, popen_mock):
+        self._failed_process(popen_mock, "You are not logged in.")
+
+        with self.assertRaises(utils.kopf.TemporaryError) as raised:
+            utils.get_secret_from_bitwarden(self.logger, "item-1")
+
+        self.assertEqual(raised.exception.delay, utils.LOOKUP_RETRY_SECONDS)
+        self.assertIn("item-1", str(raised.exception))
 
     @patch("utils.utils.subprocess.Popen")
     def test_command_wrapper_fails_softly_when_bw_cannot_start(self, popen_mock):
