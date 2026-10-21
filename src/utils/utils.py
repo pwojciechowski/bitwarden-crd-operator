@@ -68,7 +68,7 @@ ITEM_ID_PATTERN = re.compile(
 def _rejects_non_uuid(logger, id):
     if ITEM_ID_PATTERN.fullmatch(id):
         return False
-    logger.warn(f"Refusing Bitwarden item id {id!r}: not a UUID")
+    logger.warn(f"Refusing Bitwarden item id {id!r}: not a lowercase UUID")
     return True
 
 
@@ -85,7 +85,7 @@ def get_secret_from_bitwarden(logger, id):
     id = str(id)
     if _rejects_non_uuid(logger, id):
         raise kopf.TemporaryError(
-            f"Refusing Bitwarden item id {id!r}: not a UUID; fix the CR",
+            f"Refusing Bitwarden item id {id!r}: not a lowercase UUID; fix the CR",
             delay=bw_sync_interval,
         )
     if _str_to_bool(os.environ.get("BW_FORCE_SYNC", "false")):
