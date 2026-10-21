@@ -370,11 +370,10 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
     @patch("utils.utils.subprocess.Popen")
     def test_sync_bw_reports_whether_the_sync_succeeded(self, popen_mock):
         failed = (1, {"success": False, "message": "Service Unavailable"})
-        for force in (False, True):
-            with self.subTest(force=force):
-                self._bw_results(popen_mock, (0, {"success": True}), failed)
-                self.assertTrue(utils.sync_bw(self.logger, force=force))
-                self.assertFalse(utils.sync_bw(self.logger, force=force))
+        self._bw_results(popen_mock, (0, {"success": True}), failed)
+
+        self.assertTrue(utils.sync_bw(self.logger))
+        self.assertFalse(utils.sync_bw(self.logger))
 
     @patch("utils.utils.subprocess.Popen")
     def test_other_item_lookup_failures_retry_soon(self, popen_mock):
