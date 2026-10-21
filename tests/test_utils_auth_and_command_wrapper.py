@@ -296,6 +296,8 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
             ITEM_ID + "\n",
             ITEM_ID.replace("-", ""),
             ITEM_ID[:14] + "0" + ITEM_ID[15:],  # version 0: bw searches names
+            ITEM_ID[:14] + "6" + ITEM_ID[15:],  # version 6: likewise
+            ITEM_ID[:19] + "c" + ITEM_ID[20:],  # variant c: likewise
             123,
         ]
         for item_id in not_uuids:
@@ -304,7 +306,7 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
                     utils.get_secret_from_bitwarden(self.logger, item_id)
                 # Temporary, so a create handler still picks up a fixed spec.id.
                 self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
-                self.assertIn("not a UUID", str(raised.exception))
+                self.assertIn("not a lowercase UUID", str(raised.exception))
                 self.assertIsNone(utils.get_attachment(self.logger, item_id, "f"))
 
         popen_mock.assert_not_called()
@@ -431,9 +433,10 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         utils.sync_bw(self.logger)
 
         with self.assertRaises(utils.kopf.TemporaryError) as raised:
-            utils.get_secret_from_bitwarden(self.logger, "item-1")
+            utils.get_secret_from_bitwarden(self.logger, ITEM_ID)
 
         self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
+        self.assertIn("not found", str(raised.exception))
 
     @patch("utils.utils.subprocess.Popen")
     def test_other_item_lookup_failures_retry_soon(self, popen_mock):
