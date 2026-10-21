@@ -151,10 +151,19 @@ class TemplateLimitTests(unittest.TestCase):
 
         self.assertIn("rendered output exceeds", self._refused(source))
 
+    def test_output_at_the_limit_renders(self):
+        source = "{{ 'x' * %d }}" % template.RENDERED_MAX_CHARS
+
+        self.assertEqual(
+            len(template.render_template(self.logger, source)),
+            template.RENDERED_MAX_CHARS,
+        )
+
     def test_a_render_stops_after_its_cpu_budget(self):
-        # Produces no output, so only the CPU budget stops it.
+        # Produces no output, so only the CPU budget stops it. Finite (1e7
+        # iterations, seconds when traced), so a regression fails, not hangs.
         source = (
-            "{% for i in range(100000) %}{% for j in range(100000) %}"
+            "{% for i in range(100) %}{% for j in range(100000) %}"
             "{% endfor %}{% endfor %}"
         )
         with patch.object(template, "RENDER_CPU_SECONDS", 0.2):
@@ -164,15 +173,63 @@ class TemplateLimitTests(unittest.TestCase):
         self.assertIn("CPU", message)
         self.assertLess(time.monotonic() - started, 5)
 
+    def test_the_cpu_budget_never_interrupts_a_lookup(self):
+        # Raised inside operator or stdlib code (Popen after the fork, a
+        # logging lock), it could orphan a bw process outside the command
+        # lock. The render stops at the next template line instead.
+        finished = []
+
+        def slow_lookup(*args, **kwargs):
+            deadline = time.thread_time() + 0.3
+            while time.thread_time() < deadline:
+                pass
+            finished.append(True)
+            return {"data": {"login": {"password": "p"}}}
+
+        lookup = patch.dict(
+            template.BitwardenLookupHandler.bitwarden_lookup.__globals__,
+            {"get_secret_from_bitwarden": slow_lookup},
+        )
+        with lookup, patch.object(template, "RENDER_CPU_SECONDS", 0.1):
+            message = self._refused(
+                '{{ bitwarden_lookup("item-1", "login", "password") }}{{ "after" }}'
+            )
+
+        self.assertEqual([True], finished)
+        self.assertIn("CPU", message)
+
+    def test_a_huge_integer_power_is_refused(self):
+        # One C big-integer operation: minutes of CPU that no tracer sees,
+        # and Jinja would fold the constant at compile time. (Jinja's ** is
+        # left-associative: 10 ** 10 ** 8 is only 10 ** 80.)
+        for source in ("{{ 10 ** 100000000 }}", "{{ (10 ** 10) ** 100000000 }}"):
+            with self.subTest(source=source):
+                self.assertIn("exponent", self._refused(source))
+
+    def test_small_powers_still_render(self):
+        self.assertEqual(template.render_template(self.logger, "{{ 2 ** 10 }}"), "1024")
+
     def test_the_cpu_budget_restores_the_previous_tracer(self):
         def tracer(frame, event, arg):
             return None
 
+        sources = {
+            "ok": "ok",
+            "cpu": "{% for i in range(100) %}{% for j in range(100000) %}"
+            "{% endfor %}{% endfor %}",
+            "output": "{% for i in range(100000) %}0123456789{% endfor %}",
+        }
         previous = sys.gettrace()
-        sys.settrace(tracer)
         try:
-            template.render_template(self.logger, "ok")
-            self.assertIs(sys.gettrace(), tracer)
+            for case, source in sources.items():
+                with self.subTest(case=case):
+                    sys.settrace(tracer)
+                    with patch.object(template, "RENDER_CPU_SECONDS", 0.2):
+                        try:
+                            template.render_template(self.logger, source)
+                        except TemporaryError:
+                            pass
+                    self.assertIs(sys.gettrace(), tracer)
         finally:
             sys.settrace(previous)
 
