@@ -355,13 +355,26 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
     def test_not_found_after_a_failed_sync_retries_soon(self, popen_mock):
         # The lookup ran against a stale cache: an item created since the last
         # sync, or an empty cache after a reset, also answers "Not found.".
-        not_found = (1, {"success": False, "message": "Not found."})
-        self._bw_results(popen_mock, not_found, not_found)
+        self._bw_results(
+            popen_mock,
+            (1, {"success": False, "message": "Service Unavailable"}),
+            (1, {"success": False, "message": "Not found."}),
+        )
 
         with self.assertRaises(utils.kopf.TemporaryError) as raised:
             utils.get_secret_from_bitwarden(self.logger, "item-1")
 
         self.assertEqual(raised.exception.delay, utils.LOOKUP_RETRY_SECONDS)
+        self.assertIn("after a failed sync", str(raised.exception))
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_sync_bw_reports_whether_the_sync_succeeded(self, popen_mock):
+        failed = (1, {"success": False, "message": "Service Unavailable"})
+        for force in (False, True):
+            with self.subTest(force=force):
+                self._bw_results(popen_mock, (0, {"success": True}), failed)
+                self.assertTrue(utils.sync_bw(self.logger, force=force))
+                self.assertFalse(utils.sync_bw(self.logger, force=force))
 
     @patch("utils.utils.subprocess.Popen")
     def test_other_item_lookup_failures_retry_soon(self, popen_mock):
