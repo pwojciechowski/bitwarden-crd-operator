@@ -23,6 +23,9 @@ _last_auth_failure_at = 0.0
 # Starts at import, so a new pod gets the full grace period before its
 # first sync. The liveness probe reads it (bitwardenCrdOperator.py).
 _last_sync_success_at = time.monotonic()
+# Whether the latest bw sync of any kind succeeded: a failed one leaves a stale
+# cache. bw login runs a full sync, so it starts true.
+_last_sync_succeeded = True
 
 
 class BitwardenCommandException(Exception):
@@ -53,22 +56,29 @@ def _rejects_option_like(logger, **values):
     return False
 
 
-def get_secret_from_bitwarden(logger, id, force_sync=False):
+def get_secret_from_bitwarden(logger, id):
     """Returns the item, or raises kopf.TemporaryError, which kopf logs as one
     line and retries after its delay. A missing item (deleted, or not shared
     with the operator) waits a sync interval; it used to crash the handlers
     on None and retry every 60 s (Geekvetica#108 B5). Temporary, never
-    permanent, so a create handler still picks up a corrected spec.id."""
+    permanent, so a create handler still picks up a corrected spec.id.
+
+    Reads the local cache: the scheduled sync refreshes it once per cycle and
+    change handlers sync before their lookups (#108 B2). BW_FORCE_SYNC=true
+    syncs before every lookup, as before."""
     id = str(id)
     if _rejects_option_like(logger, id=id):
         raise kopf.TemporaryError(
             f"Refusing Bitwarden item id {id!r}; fix spec.id", delay=bw_sync_interval
         )
-    synced = sync_bw(logger, force=force_sync)
+    if _str_to_bool(os.environ.get("BW_FORCE_SYNC", "false")):
+        if "DEBUG" in dict(os.environ):
+            logger.info("Running with global force sync")
+        sync_bw(logger, record_health=False)
     try:
         item = command_wrapper(logger, command=["get", "item", id], raise_not_found=True)
     except BitwardenItemNotFound:
-        if not synced:
+        if not _last_sync_succeeded:
             # A stale cache answers "Not found." too: retry soon.
             raise kopf.TemporaryError(
                 f"Bitwarden item {id} not found after a failed sync; "
@@ -88,28 +98,18 @@ def get_secret_from_bitwarden(logger, id, force_sync=False):
     return item
 
 
-def sync_bw(logger, force=False):
-    """Returns whether the vault sync succeeded."""
-    def _sync(logger):
-        status = command_wrapper(logger, command="sync")
-        if status is None:
-            logger.info(f"Sync failed, retrying in {bw_sync_interval} seconds")
-            return False
+def sync_bw(logger, record_health=True):
+    """Returns whether the vault sync succeeded. Only the scheduled sync
+    records health: a CR change must not hide a dead schedule thread from
+    the liveness probe."""
+    global _last_sync_succeeded
+    _last_sync_succeeded = command_wrapper(logger, command="sync") is not None
+    if not _last_sync_succeeded:
+        logger.info("bw sync failed")
+        return False
+    if record_health:
         record_sync_success()
-        return True
-
-    if force:
-        synced = _sync(logger)
-        if "DEBUG" in dict(os.environ):
-            logger.info("Running with regular force sync enabled")
-        return synced
-
-    global_force_sync = _str_to_bool(os.environ.get("BW_FORCE_SYNC", "false"))
-
-    synced = _sync(logger)
-    if global_force_sync and "DEBUG" in dict(os.environ):
-        logger.info("Running with global force sync")
-    return synced
+    return True
 
 
 def record_sync_success():
