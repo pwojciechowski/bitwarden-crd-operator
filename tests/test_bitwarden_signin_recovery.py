@@ -25,6 +25,13 @@ if "kopf" not in sys.modules:
     kopf_module = types.ModuleType("kopf")
     kopf_module.on = types.SimpleNamespace(startup=_fake_startup, probe=_fake_startup)
     kopf_module.PermanentError = type("PermanentError", (Exception,), {})
+
+    class _TemporaryError(Exception):
+        def __init__(self, message="", delay=60):
+            super().__init__(message)
+            self.delay = delay
+
+    kopf_module.TemporaryError = _TemporaryError
     kopf_module.append_owner_reference = lambda *args, **kwargs: None
     sys.modules["kopf"] = kopf_module
 
