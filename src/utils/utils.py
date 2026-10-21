@@ -148,6 +148,12 @@ def get_attachment(logger, id, name, item=None):
     id, name = str(id), str(name)
     if item is None:
         item = get_secret_from_bitwarden(logger, id)
+    elif _rejects_non_uuid(logger, id):
+        # It still goes to --itemid, where bw would search item names.
+        raise kopf.TemporaryError(
+            f"Refusing Bitwarden item id {id!r}: not a lowercase UUID; fix the CR",
+            delay=bw_sync_interval,
+        )
     attachments = (item.get("data") or {}).get("attachments") or []
     matches = [a for a in attachments if a.get("fileName") == name]
     if len(matches) != 1:

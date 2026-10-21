@@ -393,6 +393,13 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
             self._bw_argvs(popen_mock), [["get", "attachment", "att-pem", "--itemid", ITEM_ID]]
         )
 
+        # The item id goes to --itemid, so it is checked even when the item is
+        # passed in.
+        popen_mock.reset_mock()
+        with self.assertRaises(utils.kopf.TemporaryError):
+            utils.get_attachment(self.logger, "Grafana admin", "server.pem", item=item)
+        popen_mock.assert_not_called()
+
     @patch("utils.utils.subprocess.Popen")
     def test_attachment_name_never_reaches_bw(self, popen_mock):
         self._item_with_attachments(popen_mock, [{"id": "att-1", "fileName": "my file; rm -rf /"}])
