@@ -28,7 +28,12 @@ UNLOCK_FAILED = "Failed to unlock vault"
 # bw logout, unlock too verifies the password with the server.
 SERVER_REFUSALS = (LOGIN_FAILED, UNLOCK_FAILED)
 STALE_SYNC_INTERVALS = 3
+# Only the scheduled sync feeds the liveness probe (#108 B2), and schedule
+# counts each interval from the end of a run, so three intervals hold just
+# two attempts. Retry a failed one soon.
+SYNC_RETRY_SECONDS = 60
 auth_failures = 0
+_scheduled_sync_failed = False
 
 
 def _configure_bw_host(logger):
@@ -307,7 +312,9 @@ def run_continuously(interval=30):
                 schedule.run_pending()
                 time.sleep(interval)
 
-    continuous_thread = ScheduleThread()
+    # A daemon thread: once kopf stops on SIGTERM, Python exits without
+    # waiting for this endless loop (before, the kubelet had to SIGKILL it).
+    continuous_thread = ScheduleThread(daemon=True)
     continuous_thread.start()
     return cease_continuous_run
 
@@ -322,20 +329,30 @@ def safe_bitwarden_signin(logger, **kwargs):
 
 def safe_sync_bw(logger, **kwargs):
     """Wrapper for sync_bw that prevents schedule job cancellation on errors."""
+    global _scheduled_sync_failed
     try:
-        sync_bw(logger, **kwargs)
+        _scheduled_sync_failed = not sync_bw(logger, **kwargs)
     except Exception as e:
-        logger.error(f"Sync failed: {e}. Will retry on next schedule.")
+        _scheduled_sync_failed = True
+        logger.error(f"Sync failed: {e}. Retrying in {SYNC_RETRY_SECONDS}s.")
+
+
+def retry_failed_sync(logger):
+    if _scheduled_sync_failed:
+        safe_sync_bw(logger)
 
 
 @kopf.on.startup()
 def load_schedules(logger, **kwargs):
     logger.info("Loading schedules")
     bitwarden_signin(logger)
+    # Timers read the cache from +10 s: fill it rather than trust the login.
+    safe_sync_bw(logger)
 
     bw_sync_interval = float(os.environ.get("BW_SYNC_INTERVAL", 900))
     bw_relogin_interval = float(os.environ.get("BW_RELOGIN_INTERVAL", 3600))
 
     schedule.every(bw_relogin_interval).seconds.do(safe_bitwarden_signin, logger=logger)
     schedule.every(bw_sync_interval).seconds.do(safe_sync_bw, logger=logger)
+    schedule.every(SYNC_RETRY_SECONDS).seconds.do(retry_failed_sync, logger=logger)
     run_continuously()

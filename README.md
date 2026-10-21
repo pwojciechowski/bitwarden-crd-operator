@@ -386,6 +386,8 @@ spec:
 | `scope` | The type of field to retrieve | `login`, `fields`, `attachment` |
 | `field` | The specific field name | See table below |
 
+The item ID, here and in `spec.id`, must be the item's lowercase UUID. Item names are refused: `bw get item` would search names and could pick a renamed or duplicate item.
+
 **Field values based on scope:**
 
 | Scope | Valid Field Values | Description |
