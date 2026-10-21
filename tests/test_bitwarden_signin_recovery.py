@@ -3,6 +3,7 @@ import inspect
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -565,6 +566,20 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
                 os.environ["BW_SYNC_STALE_SECONDS"] = invalid
                 with self.assertRaises(operator.kopf.PermanentError):
                     self._probe_at(301)
+
+
+class ScheduleThreadTests(unittest.TestCase):
+    def test_schedule_thread_does_not_keep_the_process_alive(self):
+        # A non-daemon thread kept Python running after kopf stopped on SIGTERM,
+        # until the kubelet's SIGKILL (#108).
+        cease = operator.run_continuously(interval=0.01)
+        try:
+            [thread] = [
+                t for t in threading.enumerate() if type(t).__name__ == "ScheduleThread"
+            ]
+            self.assertTrue(thread.daemon)
+        finally:
+            cease.set()
 
 
 if __name__ == "__main__":
