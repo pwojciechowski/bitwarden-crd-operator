@@ -54,17 +54,27 @@ def _rejects_option_like(logger, **values):
 
 
 def get_secret_from_bitwarden(logger, id, force_sync=False):
-    """Returns the item, or raises a kopf error: kopf logs a TemporaryError as
-    one line and retries after its delay. A missing item (deleted, or not
-    shared with the operator) waits a sync interval; it used to crash the
-    handlers on None and retry every 60 s (Geekvetica#108 B5)."""
+    """Returns the item, or raises kopf.TemporaryError, which kopf logs as one
+    line and retries after its delay. A missing item (deleted, or not shared
+    with the operator) waits a sync interval; it used to crash the handlers
+    on None and retry every 60 s (Geekvetica#108 B5). Temporary, never
+    permanent, so a create handler still picks up a corrected spec.id."""
     id = str(id)
     if _rejects_option_like(logger, id=id):
-        raise kopf.PermanentError(f"Refusing Bitwarden item id {id!r}")
-    sync_bw(logger, force=force_sync)
+        raise kopf.TemporaryError(
+            f"Refusing Bitwarden item id {id!r}; fix spec.id", delay=bw_sync_interval
+        )
+    synced = sync_bw(logger, force=force_sync)
     try:
         item = command_wrapper(logger, command=["get", "item", id], raise_not_found=True)
     except BitwardenItemNotFound:
+        if not synced:
+            # A stale cache answers "Not found." too: retry soon.
+            raise kopf.TemporaryError(
+                f"Bitwarden item {id} not found after a failed sync; "
+                f"retrying in {LOOKUP_RETRY_SECONDS}s",
+                delay=LOOKUP_RETRY_SECONDS,
+            ) from None
         raise kopf.TemporaryError(
             f"Bitwarden item {id} not found (deleted, or not shared with the "
             f"operator); retrying in {bw_sync_interval:g}s",
@@ -79,27 +89,27 @@ def get_secret_from_bitwarden(logger, id, force_sync=False):
 
 
 def sync_bw(logger, force=False):
+    """Returns whether the vault sync succeeded."""
     def _sync(logger):
         status = command_wrapper(logger, command="sync")
         if status is None:
             logger.info(f"Sync failed, retrying in {bw_sync_interval} seconds")
-            return
+            return False
         record_sync_success()
+        return True
 
     if force:
-        _sync(logger)
+        synced = _sync(logger)
         if "DEBUG" in dict(os.environ):
             logger.info("Running with regular force sync enabled")
-        return
+        return synced
 
     global_force_sync = _str_to_bool(os.environ.get("BW_FORCE_SYNC", "false"))
 
-    if global_force_sync:
-        _sync(logger)
-        if "DEBUG" in dict(os.environ):
-            logger.info("Running with global force sync")
-    else:
-        _sync(logger)
+    synced = _sync(logger)
+    if global_force_sync and "DEBUG" in dict(os.environ):
+        logger.info("Running with global force sync")
+    return synced
 
 
 def record_sync_success():

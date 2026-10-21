@@ -84,6 +84,21 @@ class TemplateRenderingTests(unittest.TestCase):
                 )
 
 
+    def test_a_lookup_error_reaches_kopf_unchanged_through_the_render(self):
+        # The sandboxed render must not wrap the kopf error: its delay is the
+        # retry schedule (Geekvetica#108 B5).
+        temporary_error = sys.modules["kopf"].TemporaryError
+
+        def missing_item(*args, **kwargs):
+            raise temporary_error("Bitwarden item item-1 not found", delay=123)
+
+        with patch.dict(self._lookup_globals(), {"get_secret_from_bitwarden": missing_item}):
+            with self.assertRaises(temporary_error) as raised:
+                template.render_template(
+                    self.logger, '{{ bitwarden_lookup("item-1", "login", "password") }}'
+                )
+        self.assertEqual(raised.exception.delay, 123)
+
     def test_missing_custom_field_fails_rendering(self):
         item = {"data": {"fields": [{"name": "present", "value": "v"}]}}
         with patch.dict(

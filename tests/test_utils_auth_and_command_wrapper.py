@@ -311,21 +311,29 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
     def test_cr_values_that_look_like_options_are_rejected(self, popen_mock):
         self._ok_process(popen_mock)
 
-        with self.assertRaises(utils.kopf.PermanentError):
+        with self.assertRaises(utils.kopf.TemporaryError) as raised:
             utils.get_secret_from_bitwarden(self.logger, "--session=x")
+        # Temporary, so a create handler still picks up a corrected spec.id.
+        self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
         self.assertIsNone(utils.get_attachment(self.logger, "item-1", "-x"))
         self.assertIsNone(utils.get_attachment(self.logger, "--help", "file"))
 
         commands = [call.args[0] for call in popen_mock.call_args_list]
         self.assertFalse(any(argv[2] == "get" for argv in commands), commands)
 
+    def _bw_results(self, popen_mock, *responses):
+        """One fake bw process per call: (returncode, response dict)."""
+        processes = []
+        for returncode, response in responses:
+            process = MagicMock()
+            process.returncode = returncode
+            process.communicate.return_value = (json.dumps(response).encode(), b"")
+            processes.append(process)
+        popen_mock.side_effect = processes
+
     def _failed_process(self, popen_mock, message):
-        process = MagicMock()
-        process.returncode = 1
-        process.communicate.return_value = (
-            json.dumps({"success": False, "message": message}).encode(), b""
-        )
-        popen_mock.return_value = process
+        failed = (1, {"success": False, "message": message})
+        self._bw_results(popen_mock, (0, {"success": True}), failed)
 
     @patch("utils.utils.subprocess.Popen")
     def test_missing_item_is_one_clear_error_retried_at_the_sync_interval(self, popen_mock):
@@ -342,6 +350,18 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         self.assertFalse(
             [m for m in self.logger.messages if "get item" in m[1]], self.logger.messages
         )
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_not_found_after_a_failed_sync_retries_soon(self, popen_mock):
+        # The lookup ran against a stale cache: an item created since the last
+        # sync, or an empty cache after a reset, also answers "Not found.".
+        not_found = (1, {"success": False, "message": "Not found."})
+        self._bw_results(popen_mock, not_found, not_found)
+
+        with self.assertRaises(utils.kopf.TemporaryError) as raised:
+            utils.get_secret_from_bitwarden(self.logger, "item-1")
+
+        self.assertEqual(raised.exception.delay, utils.LOOKUP_RETRY_SECONDS)
 
     @patch("utils.utils.subprocess.Popen")
     def test_other_item_lookup_failures_retry_soon(self, popen_mock):
