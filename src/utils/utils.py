@@ -105,7 +105,7 @@ def sync_bw(logger, record_health=True):
     global _last_sync_succeeded
     _last_sync_succeeded = command_wrapper(logger, command="sync") is not None
     if not _last_sync_succeeded:
-        logger.info(f"Sync failed, retrying in {bw_sync_interval} seconds")
+        logger.info("bw sync failed")
         return False
     if record_health:
         record_sync_success()

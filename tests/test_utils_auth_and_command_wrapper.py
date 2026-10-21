@@ -404,6 +404,19 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         self.assertFalse(utils.sync_bw(self.logger))
 
     @patch("utils.utils.subprocess.Popen")
+    def test_a_successful_sync_ends_the_soon_retry_of_missing_items(self, popen_mock):
+        failed = (1, {"success": False, "message": "Service Unavailable"})
+        not_found = (1, {"success": False, "message": "Not found."})
+        self._bw_results(popen_mock, failed, (0, {"success": True}), not_found)
+        utils.sync_bw(self.logger)
+        utils.sync_bw(self.logger)
+
+        with self.assertRaises(utils.kopf.TemporaryError) as raised:
+            utils.get_secret_from_bitwarden(self.logger, "item-1")
+
+        self.assertEqual(raised.exception.delay, utils.bw_sync_interval)
+
+    @patch("utils.utils.subprocess.Popen")
     def test_other_item_lookup_failures_retry_soon(self, popen_mock):
         self._failed_process(popen_mock, "You are not logged in.")
 

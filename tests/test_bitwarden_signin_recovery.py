@@ -6,7 +6,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
@@ -565,6 +565,53 @@ class BitwardenSigninRecoveryTests(unittest.TestCase):
                 os.environ["BW_SYNC_STALE_SECONDS"] = invalid
                 with self.assertRaises(operator.kopf.PermanentError):
                     self._probe_at(301)
+
+
+class ScheduledSyncTests(unittest.TestCase):
+    """#108 B2: only the scheduled sync feeds the liveness probe. A failed one
+    is retried every minute, or three sync intervals hold only two attempts
+    (schedule counts from the end of each run) and a 60-minute Vaultwarden
+    outage would restart the pod."""
+
+    def setUp(self):
+        self.logger = DummyLogger()
+        self.addCleanup(setattr, operator, "_scheduled_sync_failed", False)
+
+    def test_a_failed_scheduled_sync_is_retried_until_it_succeeds(self):
+        with patch("bitwardenCrdOperator.sync_bw", side_effect=[False, False, True]) as sync:
+            operator.safe_sync_bw(self.logger)
+            operator.retry_failed_sync(self.logger)
+            operator.retry_failed_sync(self.logger)
+            operator.retry_failed_sync(self.logger)
+
+        self.assertEqual(3, sync.call_count)
+
+    def test_a_scheduled_sync_that_raises_is_retried(self):
+        with patch("bitwardenCrdOperator.sync_bw", side_effect=[RuntimeError("x"), True]) as sync:
+            operator.safe_sync_bw(self.logger)
+            operator.retry_failed_sync(self.logger)
+            operator.retry_failed_sync(self.logger)
+
+        self.assertEqual(2, sync.call_count)
+
+    def test_startup_syncs_once_after_signing_in_and_schedules_the_retry(self):
+        calls = MagicMock()
+        calls.sync.return_value = True
+        with patch.multiple(
+            operator,
+            bitwarden_signin=calls.signin,
+            sync_bw=calls.sync,
+            schedule=calls.schedule,
+            run_continuously=MagicMock(),
+        ):
+            operator.load_schedules(self.logger)
+
+        names = [name for name, _, _ in calls.mock_calls if name in ("signin", "sync")]
+        self.assertEqual(["signin", "sync"], names)
+        calls.schedule.every.assert_any_call(operator.SYNC_RETRY_SECONDS)
+        calls.schedule.every.return_value.seconds.do.assert_any_call(
+            operator.retry_failed_sync, logger=self.logger
+        )
 
 
 if __name__ == "__main__":
