@@ -83,7 +83,11 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         os.environ.pop("BW_AUTH_COOLDOWN_SECONDS", None)
         os.environ.pop("BW_COMMAND_TIMEOUT", None)
         os.environ.pop("BW_HOST", None)
+        os.environ.pop("BW_FORCE_SYNC", None)
         utils.record_auth_success()
+        last_sync = patch.object(utils, "_last_sync_succeeded", True)
+        last_sync.start()
+        self.addCleanup(last_sync.stop)
 
     def tearDown(self):
         utils.record_sync_success()
@@ -332,8 +336,31 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
         popen_mock.side_effect = processes
 
     def _failed_process(self, popen_mock, message):
-        failed = (1, {"success": False, "message": message})
-        self._bw_results(popen_mock, (0, {"success": True}), failed)
+        self._bw_results(popen_mock, (1, {"success": False, "message": message}))
+
+    def _bw_argvs(self, popen_mock):
+        return [call.args[0][2:] for call in popen_mock.call_args_list]
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_item_lookup_reads_the_local_cache_without_syncing(self, popen_mock):
+        # #108 B2: one bw sync per item per pass made a pass take ~14 min. The
+        # scheduled sync refreshes the cache; change handlers sync themselves.
+        self._ok_process(popen_mock)
+
+        utils.get_secret_from_bitwarden(self.logger, "item-1")
+
+        self.assertEqual(self._bw_argvs(popen_mock), [["get", "item", "item-1"]])
+
+    @patch("utils.utils.subprocess.Popen")
+    def test_bw_force_sync_syncs_before_every_lookup(self, popen_mock):
+        self._ok_process(popen_mock)
+        os.environ["BW_FORCE_SYNC"] = "true"
+
+        utils.get_secret_from_bitwarden(self.logger, "item-1")
+
+        self.assertEqual(
+            self._bw_argvs(popen_mock), [["sync"], ["get", "item", "item-1"]]
+        )
 
     @patch("utils.utils.subprocess.Popen")
     def test_missing_item_is_one_clear_error_retried_at_the_sync_interval(self, popen_mock):
@@ -360,6 +387,7 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
             (1, {"success": False, "message": "Service Unavailable"}),
             (1, {"success": False, "message": "Not found."}),
         )
+        utils.sync_bw(self.logger)
 
         with self.assertRaises(utils.kopf.TemporaryError) as raised:
             utils.get_secret_from_bitwarden(self.logger, "item-1")
@@ -576,6 +604,20 @@ class UtilsAuthAndCommandWrapperTests(unittest.TestCase):
             utils.sync_bw(self.logger)
         with patch("utils.utils.time.monotonic", return_value=1030.0):
             self.assertEqual(utils.seconds_since_last_sync(), 30.0)
+
+    @patch("utils.utils.command_wrapper")
+    def test_a_change_handler_sync_does_not_reset_the_sync_age(
+        self, command_wrapper_mock
+    ):
+        # Only the scheduled sync feeds the liveness probe: CR changes must not
+        # hide a dead schedule thread (#108 B2/B3).
+        command_wrapper_mock.return_value = {"success": True}
+        with patch("utils.utils.time.monotonic", return_value=1000.0):
+            utils.sync_bw(self.logger)
+        with patch("utils.utils.time.monotonic", return_value=2000.0):
+            self.assertTrue(utils.sync_bw(self.logger, record_health=False))
+        with patch("utils.utils.time.monotonic", return_value=2500.0):
+            self.assertEqual(utils.seconds_since_last_sync(), 1500.0)
 
     @patch("utils.utils.command_wrapper")
     def test_a_failed_sync_does_not_reset_the_sync_age(self, command_wrapper_mock):

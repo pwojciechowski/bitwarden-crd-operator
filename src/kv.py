@@ -9,6 +9,7 @@ from utils.utils import (
     parse_fields_scope,
     get_attachment,
     unlock_bw,
+    sync_bw,
     bw_sync_interval,
     build_secret_metadata,
     extract_secret_config,
@@ -70,6 +71,7 @@ def create_managed_secret(spec, name, namespace, logger, body, **kwargs):
     config = extract_secret_config(spec)
 
     unlock_bw(logger)
+    sync_bw(logger, record_health=False)
     logger.info(f"Locking up secret with ID: {bw_id}")
     secret_json_object = get_secret_from_bitwarden(logger, bw_id)
 
@@ -90,7 +92,7 @@ def create_managed_secret(spec, name, namespace, logger, body, **kwargs):
 
 
 @kopf.on.update("bitwarden-secret.lerentis.uploadfilter24.eu")
-def update_managed_secret(spec, status, name, namespace, logger, body, **kwargs):
+def update_managed_secret(spec, status, name, namespace, logger, body, sync=True, **kwargs):
     content_def = body["spec"]["content"]
     bw_id = spec.get("id")
     config = extract_secret_config(spec)
@@ -119,6 +121,8 @@ def update_managed_secret(spec, status, name, namespace, logger, body, **kwargs)
             logger.info(str(exc))
             return
         raise
+    if sync:
+        sync_bw(logger, record_health=False)
     logger.info(f"Locking up secret with ID: {bw_id}")
     secret_json_object = get_secret_from_bitwarden(logger, bw_id)
 
@@ -144,7 +148,8 @@ def update_managed_secret(spec, status, name, namespace, logger, body, **kwargs)
     initial_delay=10,
 )
 def refresh_managed_secret(**kwargs):
-    update_managed_secret(**kwargs)
+    # The scheduled sync_bw refreshed the cache this cycle (#108 B2).
+    update_managed_secret(sync=False, **kwargs)
 
 
 @kopf.on.delete("bitwarden-secret.lerentis.uploadfilter24.eu")

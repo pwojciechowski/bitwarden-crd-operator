@@ -7,6 +7,7 @@ from utils.utils import (
     BitwardenCommandException,
     get_secret_from_bitwarden,
     unlock_bw,
+    sync_bw,
     bw_sync_interval,
     build_secret_metadata,
     extract_secret_config,
@@ -55,6 +56,7 @@ def create_managed_registry_secret(spec, name, namespace, logger, **kwargs):
     config = extract_secret_config(spec)
 
     unlock_bw(logger)
+    sync_bw(logger, record_health=False)
     logger.info(f"Locking up secret with ID: {bw_id}")
     secret_json_object = get_secret_from_bitwarden(logger, bw_id)
 
@@ -77,7 +79,7 @@ def create_managed_registry_secret(spec, name, namespace, logger, **kwargs):
 
 @kopf.on.update("registry-credential.lerentis.uploadfilter24.eu")
 def update_managed_registry_secret(
-    spec, status, name, namespace, logger, body, **kwargs
+    spec, status, name, namespace, logger, body, sync=True, **kwargs
 ):
     username_ref = spec.get("usernameRef")
     password_ref = spec.get("passwordRef")
@@ -109,6 +111,8 @@ def update_managed_registry_secret(
             logger.info(str(exc))
             return
         raise
+    if sync:
+        sync_bw(logger, record_health=False)
     logger.info(f"Locking up secret with ID: {bw_id}")
     secret_json_object = get_secret_from_bitwarden(logger, bw_id)
 
@@ -135,7 +139,8 @@ def update_managed_registry_secret(
     initial_delay=10,
 )
 def refresh_managed_registry_secret(**kwargs):
-    update_managed_registry_secret(**kwargs)
+    # The scheduled sync_bw refreshed the cache this cycle (#108 B2).
+    update_managed_registry_secret(sync=False, **kwargs)
 
 
 @kopf.on.delete("registry-credential.lerentis.uploadfilter24.eu")

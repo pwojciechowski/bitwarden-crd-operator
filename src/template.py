@@ -5,6 +5,7 @@ import kubernetes
 from utils.utils import (
     BitwardenCommandException,
     unlock_bw,
+    sync_bw,
     bw_sync_interval,
     build_secret_metadata,
     extract_secret_config,
@@ -70,6 +71,7 @@ def create_managed_secret(spec, name, namespace, logger, body, **kwargs):
     config = extract_secret_config(spec)
 
     unlock_bw(logger)
+    sync_bw(logger, record_health=False)
 
     secret = kubernetes.client.V1Secret()
     secret.metadata = build_secret_metadata(
@@ -93,6 +95,7 @@ def create_beta7_secret(spec, name, namespace, logger, body, **kwargs):
     config = extract_secret_config(spec)
 
     unlock_bw(logger)
+    sync_bw(logger, record_health=False)
 
     secret = kubernetes.client.V1Secret()
     secret.metadata = build_secret_metadata(
@@ -110,7 +113,7 @@ def create_beta7_secret(spec, name, namespace, logger, body, **kwargs):
     create_secret(logger, secret, config["secret_namespace"])
 
 
-def update_beta7_secret(spec, status, name, namespace, logger, body, **kwargs):
+def update_beta7_secret(spec, status, name, namespace, logger, body, sync=True, **kwargs):
     template = spec.get("template")
     filename = spec.get("filename")
     config = extract_secret_config(spec)
@@ -139,6 +142,8 @@ def update_beta7_secret(spec, status, name, namespace, logger, body, **kwargs):
             logger.info(str(exc))
             return
         raise
+    if sync:
+        sync_bw(logger, record_health=False)
 
     secret = kubernetes.client.V1Secret()
     secret.metadata = build_secret_metadata(
@@ -157,10 +162,10 @@ def update_beta7_secret(spec, status, name, namespace, logger, body, **kwargs):
 
 
 @kopf.on.update("bitwarden-template.lerentis.uploadfilter24.eu")
-def update_managed_secret(spec, status, name, namespace, logger, body, **kwargs):
+def update_managed_secret(spec, status, name, namespace, logger, body, sync=True, **kwargs):
     template = spec.get("template")
     if template is not None:
-        update_beta7_secret(spec, status, name, namespace, logger, body, **kwargs)
+        update_beta7_secret(spec, status, name, namespace, logger, body, sync=sync, **kwargs)
         return
 
     content_def = spec.get("content")
@@ -190,6 +195,8 @@ def update_managed_secret(spec, status, name, namespace, logger, body, **kwargs)
             logger.info(str(exc))
             return
         raise
+    if sync:
+        sync_bw(logger, record_health=False)
 
     secret = kubernetes.client.V1Secret()
     secret.metadata = build_secret_metadata(
@@ -213,7 +220,8 @@ def update_managed_secret(spec, status, name, namespace, logger, body, **kwargs)
     initial_delay=10,
 )
 def refresh_managed_secret(**kwargs):
-    update_managed_secret(**kwargs)
+    # The scheduled sync_bw refreshed the cache this cycle (#108 B2).
+    update_managed_secret(sync=False, **kwargs)
 
 
 @kopf.on.delete("bitwarden-template.lerentis.uploadfilter24.eu")
